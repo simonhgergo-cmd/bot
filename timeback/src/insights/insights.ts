@@ -1,5 +1,8 @@
-import type { Category, CategoryStats, DateKey, Insights, Settings, TimeBlock } from '../domain/types.ts';
-import { MINUTES_PER_DAY, SLOTS_PER_DAY, SLOT_MINUTES, dayWindow, overlap, parseTime, toMinutes, windowSlots } from '../domain/time.ts';
+import type { Category, CategoryStats, DateKey, DayPart, Insights, Settings, TimeBlock } from '../domain/types.ts';
+import { MINUTES_PER_DAY, SLOTS_PER_DAY, SLOT_MINUTES, dayPart, dayWindow, overlap, parseTime, toMinutes, windowSlots } from '../domain/time.ts';
+
+/** Blocks of the same activity this close together count as one session. */
+const SESSION_JOIN_GAP = 5;
 import { coverage, minutesByCategory } from '../calendar/dayView.ts';
 
 /**
@@ -17,6 +20,8 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
       shareOfFreeTimeByWeekday: [0, 0, 0, 0, 0, 0, 0],
       slotProfile: new Array(SLOTS_PER_DAY).fill(0),
       typicalStartMinute: null,
+      sessionsPerDay: 0,
+      sessionsByPart: {},
     };
   }
   if (dates.length === 0) {
@@ -26,6 +31,7 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
 
   const committed = new Set(categories.filter((c) => c.flexibility !== 'flexible').map((c) => c.id));
   const starts: Record<string, number[]> = {};
+  const sessionAcc: Record<string, { count: number; parts: Partial<Record<DayPart, { minutes: number; count: number }>> }> = {};
   const weekdayCount = [0, 0, 0, 0, 0, 0, 0];
   let coverageSum = 0;
 
@@ -62,6 +68,39 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
       if (bs >= ds) firstStart[b.categoryId] = Math.min(firstStart[b.categoryId] ?? bs - ds, bs - ds);
     }
     for (const [categoryId, m] of Object.entries(firstStart)) (starts[categoryId] ??= []).push(m);
+
+    // Sessions: each category's blocks on this day, clipped to it, with touching ones joined.
+    const spans: Record<string, Array<[number, number]>> = {};
+    for (const b of blocks) {
+      if (!byCategory[b.categoryId]) continue;
+      const s = Math.max(ds, toMinutes(b.start));
+      const e = Math.min(de, toMinutes(b.end));
+      if (e > s) (spans[b.categoryId] ??= []).push([s, e]);
+    }
+    for (const [categoryId, list] of Object.entries(spans)) {
+      list.sort((a, b) => a[0] - b[0]);
+      const joined: Array<[number, number]> = [];
+      for (const [s, e] of list) {
+        const last = joined.at(-1);
+        if (last && s - last[1] <= SESSION_JOIN_GAP) last[1] = Math.max(last[1], e);
+        else joined.push([s, e]);
+      }
+      const acc = (sessionAcc[categoryId] ??= { count: 0, parts: {} });
+      for (const [s, e] of joined) {
+        const part = (acc.parts[dayPart(s - ds)] ??= { minutes: 0, count: 0 });
+        part.minutes += e - s;
+        part.count++;
+        acc.count++;
+      }
+    }
+  }
+
+  for (const [categoryId, acc] of Object.entries(sessionAcc)) {
+    const s = byCategory[categoryId]!;
+    s.sessionsPerDay = acc.count / dates.length;
+    for (const [part, p] of Object.entries(acc.parts) as Array<[DayPart, { minutes: number; count: number }]>) {
+      s.sessionsByPart[part] = { avgMinutes: p.minutes / p.count, perDay: p.count / dates.length };
+    }
   }
 
   for (const s of Object.values(byCategory)) {

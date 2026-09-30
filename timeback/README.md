@@ -24,6 +24,7 @@ Requires Node ≥ 22.18, which runs `.ts` files directly.
 | **4. Routine calendar** | Your ideal week as editable templates (*Weekdays*, *Weekend*). The optimizer writes the first version. You add, move, resize or delete blocks, see live goal checks, and can re-plan the rest around your edits. Each day's plan is its routine with your calendar events on top. | `routine/` |
 | **2. Optimal-day calendar** | Views a second calendar showing what the day could look like, with the reasoning ("Scrolling: 2h12m → 1h to meet goal…"). It unlocks after 7 well-logged days. | `insights/`, `optimizer/` |
 | **3. Goals** | Sets targets such as *sleep ≥ 8h/day*, *scrolling ≤ 1h/day*, *exercise ≥ 150 min/week*, and tracks progress and streaks. | `goals/` |
+| **6. Coach** | Gets told what stands out: "Looks like you spend a lot of time on phone / scrolling, and your midday meals run long. I think this routine would work better:", with a real recent day next to the proposed one. Accept it in one tap, or say "Not for me" to any point. | `coach/` |
 | **5. Custom activities** | Adds their own activities ("Guitar", 45-min sessions, evenings, loves it). They're planned, offered in the review and usable in goals from day one, before any history exists. Activities can be edited, archived, merged or deleted. | `activities/` |
 
 ## Phone app design
@@ -81,6 +82,7 @@ src/
   optimizer/   optimizer.ts       Optimizer interface + GreedyOptimizer (pure)
   routine/     routine.ts         editable routine: place/trim blocks, plan per date (pure)
   activities/  activities.ts      custom activities: validation, ids, time presets (pure)
+  coach/       coach.ts           observations from history + headline (pure)
   storage/     repository.ts      persistence interface
                memoryRepository.ts, jsonFileRepository.ts
   app/         timebackApp.ts     facade: the only thing a UI calls
@@ -129,6 +131,35 @@ src/
   average. Flexible time is the user's usual *share of free time*. Without
   this, a workday gets compared against weekend socializing and the plan
   overflows 24h. The demo exposed exactly this problem in an earlier version.
+
+### How the coach works
+
+- **It notices three kinds of things** (`observe`), ranked by how many
+  minutes a day they involve:
+  - *time sinks*: a disliked activity at 1h+ a day ("You spend 3h10m a day
+    on phone / scrolling, about 22h a week.");
+  - *long sessions*: sessions that, as a habit, run 25%+ past the activity's
+    `maxSessionMinutes` ("Your midday meals take 1h30m on average, when 45m
+    is enough."). Meals default to 45 min, and any activity can set a limit;
+  - *goal gaps*: a goal missed on most recent days or weeks.
+- **Session habits are learned.** Insights record how many separate sessions
+  a day each activity has, and their average length per part of the day
+  (morning, midday, afternoon, evening, night). That's what lets it say
+  "midday meals" rather than "meals".
+- **One sentence up front.** The headline joins the top two observations:
+  "Looks like X, and Y. I think this routine would work better:".
+- **Real day vs. proposed day.** "How it is now" is the most recent
+  well-logged day of the same kind (weekday/weekend), exactly as logged, not
+  a simulation. The proposal is the routine the planner would generate, and
+  accepting saves exactly those routines (edited blocks kept).
+- **The plan acts on it.** With a session limit, the planner caps that
+  activity's daily total at limit × usual sessions, keeps every session
+  within the limit, and never places two sessions back to back (so they
+  can't merge into one long lunch). Extra sessions go to the user's other
+  usual times, e.g. breakfast.
+- **"Not for me" works here too.** Each observation carries the key of the
+  matching plan suggestion. Rejecting it removes the observation and keeps
+  that activity as usual, session lengths included.
 
 ### How the routine works
 

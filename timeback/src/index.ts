@@ -6,6 +6,7 @@ export { buildReview, reviewChanges, type ReviewChanges } from './review/endOfDa
 export { evaluateGoal, currentStreak, isMet } from './goals/goals.ts';
 export { analyze, wellLoggedDays, PREFERENCE_WEIGHT } from './insights/insights.ts';
 export { TIME_PRESETS, validateActivity, activityId, type ActivityInput } from './activities/activities.ts';
+export { observe, headline, type ObserveInput } from './coach/coach.ts';
 export { GreedyOptimizer, typicalDay, type Optimizer, type OptimizerInput } from './optimizer/optimizer.ts';
 export * as routine from './routine/routine.ts';
 export type { Repository } from './storage/repository.ts';

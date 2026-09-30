@@ -38,6 +38,11 @@ export interface Category {
   preferredTimes?: TimeWindow[];
   /** Typical length of one session in minutes; plans use blocks of at least this size. */
   sessionMinutes?: number;
+  /**
+   * A session longer than this is "dragging on" (a 90-minute lunch when 45 is
+   * plenty). The coach points it out, and plans keep each session within it.
+   */
+  maxSessionMinutes?: number;
   /** Kept for history, but no longer planned, offered in the review, or usable for new entries. */
   archived?: boolean;
 }
@@ -167,6 +172,10 @@ export interface CategoryStats {
   slotProfile: number[];
   /** Typical start of the day's first block in this category, minutes after midnight. */
   typicalStartMinute: number | null;
+  /** Average number of separate sessions per analyzed day (breakfast + lunch + dinner = 3). */
+  sessionsPerDay: number;
+  /** Session habits by time of day: how long a session usually lasts, e.g. "midday: 90 min". */
+  sessionsByPart: Partial<Record<DayPart, { avgMinutes: number; perDay: number }>>;
 }
 
 export interface Insights {
@@ -244,6 +253,49 @@ export const DEFAULT_SETTINGS: Settings = {
 
 /** `HH:mm`, a time of day with no date. */
 export type TimeOfDay = string;
+
+/** Coarse part of the day a session starts in; used to talk about habits ("your midday meals"). */
+export type DayPart = 'morning' | 'midday' | 'afternoon' | 'evening' | 'night';
+
+// ---------------------------------------------------------------------------
+// Coach: noticing patterns and proposing a better routine
+// ---------------------------------------------------------------------------
+
+export type ObservationKind =
+  | 'timeSink' // lots of time on something the user dislikes
+  | 'longSessions' // sessions regularly run past what the user considers enough
+  | 'goalGap'; // a goal is missed most days
+
+/** Something the app noticed in the user's history, with the numbers behind it. */
+export interface Observation {
+  kind: ObservationKind;
+  categoryId: string;
+  /** Full sentence for the observation list. */
+  message: string;
+  /** Short clause for the headline ("you spend a lot of time on your phone"). */
+  phrase: string;
+  /** Rough minutes per day this could free up or fix; used to rank observations. */
+  impactMinutes: number;
+  /** The same key as the matching plan suggestion, so "Not for me" works on either. */
+  suggestionKey?: string;
+}
+
+/** "Looks like… I think this routine would work better:" plus the routine to compare. */
+export interface CoachProposal {
+  headline: string;
+  observations: Observation[];
+  /** The weekday the comparison is drawn for. */
+  date: DateKey;
+  /** A real recent day of the same kind (weekday/weekend), as logged: how it is now. */
+  usual: TimeBlock[];
+  usualDate: DateKey;
+  /** The proposed day for the same date. */
+  proposed: OptimalDay['blocks'];
+  suggestions: Suggestion[];
+  reclaimedMinutes: number;
+  /** What accepting would save as the routines (edited blocks kept). */
+  routines: Routine[];
+}
 
 /**
  * One block of a routine. `end <= start` means it wraps past midnight

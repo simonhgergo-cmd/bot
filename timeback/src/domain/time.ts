@@ -1,4 +1,4 @@
-import type { DateKey, LocalDateTime, TimeOfDay, TimeWindow } from './types.ts';
+import type { DateKey, DayPart, LocalDateTime, TimeOfDay, TimeWindow } from './types.ts';
 
 export const MINUTES_PER_DAY = 24 * 60;
 /** Resolution of learned time-of-day profiles and of the optimal-day grid. */
@@ -77,6 +77,16 @@ export function windowSlots(w: TimeWindow): number[] {
   const out: number[] = [];
   for (let m = s; m < s + len; m += SLOT_MINUTES) out.push(Math.floor((m % MINUTES_PER_DAY) / SLOT_MINUTES));
   return out;
+}
+
+/** Part of the day a minute-of-day falls in (for talking about habits). */
+export function dayPart(minuteOfDay: number): DayPart {
+  const m = ((minuteOfDay % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  if (m < 5 * 60 || m >= 22 * 60) return 'night';
+  if (m < 10 * 60 + 30) return 'morning';
+  if (m < 15 * 60) return 'midday';
+  if (m < 18 * 60) return 'afternoon';
+  return 'evening';
 }
 
 /** Overlap in minutes between [aStart, aEnd) and [bStart, bEnd). */

@@ -1,4 +1,5 @@
 import type {
+  CoachProposal,
   Category,
   DateKey,
   DayReview,
@@ -21,7 +22,8 @@ import { findGaps, minutesByCategory } from '../calendar/dayView.ts';
 import { buildReview, reviewChanges, type ReviewChanges } from '../review/endOfDayReview.ts';
 import { currentStreak, evaluateGoal, periodBounds } from '../goals/goals.ts';
 import { analyze, wellLoggedDays } from '../insights/insights.ts';
-import { GreedyOptimizer, typicalDay, type Optimizer } from '../optimizer/optimizer.ts';
+import { GreedyOptimizer, typicalDay, type Optimizer, type OptimizerInput } from '../optimizer/optimizer.ts';
+import { headline, observe } from '../coach/coach.ts';
 import * as routineOps from '../routine/routine.ts';
 import { activityId, toCategory, validateActivity, type ActivityInput } from '../activities/activities.ts';
 
@@ -422,6 +424,14 @@ export class TimebackApp {
    * the rest is re-planned around them. Null until there is enough history.
    */
   async generateRoutines(today: DateKey, now: LocalDateTime): Promise<Routine[] | null> {
+    const built = await this.buildRoutines(today, now);
+    if (!built) return null;
+    for (const r of built.routines) await this.repo.saveRoutine(r);
+    return built.routines;
+  }
+
+  /** Routine generation without saving: the routines plus the optimizer run behind each. */
+  private async buildRoutines(today: DateKey, now: LocalDateTime) {
     if (!(await this.readiness(today)).ready) return null;
     let routines = await this.repo.listRoutines();
     if (routines.length === 0) {
@@ -438,18 +448,73 @@ export class TimebackApp {
       this.repo.listSuggestionDecisions(),
     ]);
     const keepAsUsual = rejectedCategories(decisions);
-    const out: Routine[] = [];
+    const out: Array<{ routine: Routine; plan: OptimalDay; input: OptimizerInput }> = [];
     for (const r of routines) {
       const date = nextDateOn(today, r.weekdays);
       const kept = r.blocks.filter((b) => b.edited);
       const fixedBlocks = routineOps.planForDate([{ ...r, blocks: kept, weekdays: [0, 1, 2, 3, 4, 5, 6] }], date, []);
-      const plan = this.optimizer.plan({ date, categories, goals: goals.filter((g) => g.active), insights, fixedBlocks, settings, keepAsUsual });
+      const input: OptimizerInput = { date, categories, goals: goals.filter((g) => g.active), insights, fixedBlocks, settings, keepAsUsual };
+      const plan = this.optimizer.plan(input);
       const fresh = routineOps.blocksFromOptimalDay({ ...plan, blocks: plan.blocks.filter((b) => b.origin === 'planned') }, this.newId);
-      const updated: Routine = { ...r, blocks: routineOps.normalize([...kept, ...fresh]), generatedAt: now };
-      await this.repo.saveRoutine(updated);
-      out.push(updated);
+      out.push({ routine: { ...r, blocks: routineOps.normalize([...kept, ...fresh]), generatedAt: now }, plan, input });
     }
-    return out;
+    return { routines: out.map((x) => x.routine), runs: out };
+  }
+
+  // -- Coach: "looks like…, I think this routine would work better" -------------
+
+  /**
+   * What stands out in the user's recent history, and a routine that addresses
+   * it, shown next to their usual day for the next weekday. Null until there
+   * is enough history, or when nothing stands out. Observations the user
+   * already turned down ("Not for me" on the matching suggestion) are left out.
+   */
+  async coach(today: DateKey, now: LocalDateTime): Promise<CoachProposal | null> {
+    const built = await this.buildRoutines(today, now);
+    if (!built) return null;
+    const [categories, decisions, progress] = await Promise.all([
+      this.activeCategories(),
+      this.repo.listSuggestionDecisions(),
+      this.goalProgress(addDays(today, -14), addDays(today, -1)),
+    ]);
+    const rejected = new Set(decisions.filter((d) => d.decision === 'rejected').map((d) => d.key));
+    const run = built.runs.find((x) => x.routine.weekdays.some((d) => d >= 1 && d <= 5)) ?? built.runs[0]!;
+    const observations = observe({
+      categories,
+      insights: run.input.insights,
+      goals: run.input.goals,
+      progress,
+    }).filter((o) => !o.suggestionKey || !rejected.has(o.suggestionKey));
+    if (observations.length === 0) return null;
+
+    // "How it is now": the most recent well-logged day of the same kind, exactly as logged.
+    const { dates } = await this.history(today);
+    const usualDate = [...dates].reverse().find((d) => run.routine.weekdays.includes(new Date(`${d}T00:00:00Z`).getUTCDay()));
+    if (!usualDate) return null;
+    const [ds, de] = dayWindow(usualDate);
+    const usual = (await this.loggedDay(usualDate)).map((b) => ({
+      ...b,
+      start: fromMinutes(Math.max(ds, toMinutes(b.start))),
+      end: fromMinutes(Math.min(de, toMinutes(b.end))),
+    }));
+    const byKey = new Map(decisions.map((d) => [d.key, d.decision]));
+    return {
+      headline: headline(observations),
+      observations,
+      date: run.input.date,
+      usual,
+      usualDate,
+      proposed: run.plan.blocks,
+      suggestions: run.plan.suggestions.map((s) => (byKey.has(s.key) ? { ...s, decision: byKey.get(s.key)! } : s)),
+      reclaimedMinutes: run.plan.reclaimedMinutes,
+      routines: built.routines,
+    };
+  }
+
+  /** "Use this routine": saves exactly the routines the proposal showed. */
+  async acceptCoachProposal(proposal: CoachProposal): Promise<Routine[]> {
+    for (const r of proposal.routines) await this.repo.saveRoutine(r);
+    return proposal.routines;
   }
 
   /** Rename a routine or change its weekdays. A weekday can belong to only one routine. */

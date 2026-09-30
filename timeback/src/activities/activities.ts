@@ -10,6 +10,7 @@ export interface ActivityInput {
   flexibility?: Flexibility;
   preferredTimes?: TimeWindow[];
   sessionMinutes?: number;
+  maxSessionMinutes?: number;
 }
 
 /** Quick picks for "When would you like to do it?". Custom windows are allowed too. */
@@ -35,9 +36,12 @@ export function validateActivity(input: ActivityInput, existing: Category[], sel
   if (clash) throw new Error(`You already have an activity called "${clash.name}"`);
   if (input.enjoyment && !ENJOYMENT.includes(input.enjoyment)) throw new Error(`Unknown enjoyment: ${input.enjoyment}`);
   if (input.flexibility && !FLEXIBILITY.includes(input.flexibility)) throw new Error(`Unknown flexibility: ${input.flexibility}`);
-  if (input.sessionMinutes !== undefined) {
-    const m = input.sessionMinutes;
+  for (const m of [input.sessionMinutes, input.maxSessionMinutes]) {
+    if (m === undefined) continue;
     if (!Number.isInteger(m) || m < 5 || m > 12 * 60 || m % 5) throw new Error('A session must be 5 minutes to 12 hours, in 5-minute steps');
+  }
+  if (input.sessionMinutes && input.maxSessionMinutes && input.maxSessionMinutes < input.sessionMinutes) {
+    throw new Error('The longest a session should take can’t be shorter than a usual session');
   }
   for (const w of input.preferredTimes ?? []) {
     if (parseTime(w.start) === parseTime(w.end)) throw new Error('A time window needs different start and end times');
@@ -55,6 +59,7 @@ export function toCategory(id: string, input: ActivityInput): Category {
     ...(input.color ? { color: input.color } : {}),
     ...(input.preferredTimes?.length ? { preferredTimes: input.preferredTimes } : {}),
     ...(input.sessionMinutes ? { sessionMinutes: input.sessionMinutes } : {}),
+    ...(input.maxSessionMinutes ? { maxSessionMinutes: input.maxSessionMinutes } : {}),
   };
 }
 
