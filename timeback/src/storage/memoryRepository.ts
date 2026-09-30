@@ -1,4 +1,4 @@
-import type { Category, DateKey, DayReview, Goal, LocalDateTime, Settings, TimeBlock } from '../domain/types.ts';
+import type { Category, DateKey, DayReview, Goal, LocalDateTime, Routine, Settings, TimeBlock } from '../domain/types.ts';
 import { DEFAULT_SETTINGS } from '../domain/types.ts';
 import type { Repository } from './repository.ts';
 
@@ -7,11 +7,12 @@ export interface Snapshot {
   blocks: TimeBlock[];
   goals: Goal[];
   reviews: DayReview[];
+  routines: Routine[];
   settings: Settings;
 }
 
 export function emptySnapshot(): Snapshot {
-  return { categories: [], blocks: [], goals: [], reviews: [], settings: { ...DEFAULT_SETTINGS } };
+  return { categories: [], blocks: [], goals: [], reviews: [], routines: [], settings: { ...DEFAULT_SETTINGS } };
 }
 
 export class MemoryRepository implements Repository {
@@ -61,6 +62,18 @@ export class MemoryRepository implements Repository {
   }
   async saveReview(review: DayReview) {
     upsert(this.data.reviews, review, (r) => r.date);
+    await this.changed();
+  }
+
+  async listRoutines() {
+    return structuredClone(this.data.routines);
+  }
+  async saveRoutine(routine: Routine) {
+    upsert(this.data.routines, routine, (r) => r.id);
+    await this.changed();
+  }
+  async deleteRoutine(id: string) {
+    this.data.routines = this.data.routines.filter((r) => r.id !== id);
     await this.changed();
   }
 

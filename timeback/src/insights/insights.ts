@@ -14,11 +14,12 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
       avgMinutesPerDay: 0,
       avgMinutesByWeekday: [0, 0, 0, 0, 0, 0, 0],
       shareOfFreeTime: 0,
+      shareOfFreeTimeByWeekday: [0, 0, 0, 0, 0, 0, 0],
       slotProfile: new Array(SLOTS_PER_DAY).fill(0),
       typicalStartMinute: null,
     };
   }
-  if (dates.length === 0) return { daysAnalyzed: 0, coverage: 0, byCategory };
+  if (dates.length === 0) return { daysAnalyzed: 0, daysByWeekday: [0, 0, 0, 0, 0, 0, 0], coverage: 0, byCategory };
 
   const committed = new Set(categories.filter((c) => c.flexibility !== 'flexible').map((c) => c.id));
   const starts: Record<string, number[]> = {};
@@ -38,7 +39,10 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
       if (!s) continue;
       s.avgMinutesPerDay += m / dates.length;
       s.avgMinutesByWeekday[weekday]! += m; // divided below
-      if (!committed.has(categoryId)) s.shareOfFreeTime += m / freeMinutes / dates.length;
+      if (!committed.has(categoryId)) {
+        s.shareOfFreeTime += m / freeMinutes / dates.length;
+        s.shareOfFreeTimeByWeekday[weekday]! += m / freeMinutes; // divided below
+      }
     }
 
     const [ds, de] = dayWindow(date);
@@ -59,11 +63,12 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
 
   for (const s of Object.values(byCategory)) {
     s.avgMinutesByWeekday = s.avgMinutesByWeekday.map((m, wd) => (weekdayCount[wd] ? m / weekdayCount[wd]! : 0));
+    s.shareOfFreeTimeByWeekday = s.shareOfFreeTimeByWeekday.map((x, wd) => (weekdayCount[wd] ? x / weekdayCount[wd]! : 0));
     const st = starts[s.categoryId];
     s.typicalStartMinute = st?.length ? circularMeanMinute(st) : null;
   }
 
-  return { daysAnalyzed: dates.length, coverage: coverageSum / dates.length, byCategory };
+  return { daysAnalyzed: dates.length, daysByWeekday: weekdayCount, coverage: coverageSum / dates.length, byCategory };
 }
 
 /**

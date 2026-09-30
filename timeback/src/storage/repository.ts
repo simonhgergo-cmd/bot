@@ -1,4 +1,4 @@
-import type { Category, DateKey, DayReview, Goal, LocalDateTime, Settings, TimeBlock } from '../domain/types.ts';
+import type { Category, DateKey, DayReview, Goal, LocalDateTime, Routine, Settings, TimeBlock } from '../domain/types.ts';
 
 /**
  * Persistence boundary. The core only talks to this interface, so the backing
@@ -19,6 +19,10 @@ export interface Repository {
 
   getReview(date: DateKey): Promise<DayReview | undefined>;
   saveReview(review: DayReview): Promise<void>;
+
+  listRoutines(): Promise<Routine[]>;
+  saveRoutine(routine: Routine): Promise<void>;
+  deleteRoutine(id: string): Promise<void>;
 
   getSettings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;

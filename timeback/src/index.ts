@@ -5,7 +5,8 @@ export { findGaps, coverage, minutesByCategory } from './calendar/dayView.ts';
 export { buildReview, answersToBlocks } from './review/endOfDayReview.ts';
 export { evaluateGoal, currentStreak, isMet } from './goals/goals.ts';
 export { analyze, wellLoggedDays } from './insights/insights.ts';
-export { GreedyOptimizer, type Optimizer, type OptimizerInput } from './optimizer/optimizer.ts';
+export { GreedyOptimizer, typicalDay, type Optimizer, type OptimizerInput } from './optimizer/optimizer.ts';
+export * as routine from './routine/routine.ts';
 export type { Repository } from './storage/repository.ts';
 export { MemoryRepository } from './storage/memoryRepository.ts';
 // JsonFileRepository is Node-only (dev/demo); import it directly from './storage/jsonFileRepository.ts'.

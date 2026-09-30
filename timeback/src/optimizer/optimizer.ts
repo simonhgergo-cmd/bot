@@ -64,7 +64,7 @@ export class GreedyOptimizer implements Optimizer {
   private budget(input: OptimizerInput) {
     const { date, categories, goals, insights, fixedBlocks, settings } = input;
     const lockedMinutes = minutesByCategory(fixedBlocks, date);
-    const baseline = this.baseline(input);
+    const baseline = typicalDay(input);
     const budgets: Record<string, number> = {};
     const drivers: Record<string, Driver> = {};
     const goalFor: Record<string, Goal> = {};
@@ -84,7 +84,8 @@ export class GreedyOptimizer implements Optimizer {
       let min = locked;
       const catGoals = goals.filter((g) => g.active && g.categoryId === c.id);
       for (const g of catGoals) {
-        const t = dailyTarget(g);
+        // Round toward the goal so grid rounding can't break it (150 min/week → 30, not 15, a day).
+        const t = g.comparison === 'atLeast' ? Math.ceil(dailyTarget(g) / SLOT) * SLOT : Math.floor(dailyTarget(g) / SLOT) * SLOT;
         if (g.comparison === 'atLeast' && t > target) {
           target = t;
           drivers[c.id] = 'goal';
@@ -143,32 +144,6 @@ export class GreedyOptimizer implements Optimizer {
 
     for (const id of Object.keys(budgets)) budgets[id] = Math.round(budgets[id]! / SLOT) * SLOT;
     return { budgets, drivers, goalFor, baseline };
-  }
-
-  /**
-   * The user's *typical* version of this particular day, before any changes:
-   *  - fixed: what's on the calendar, else this weekday's history (work Mon–Fri)
-   *  - essential: usual daily average (sleep doesn't shrink on workdays)
-   *  - flexible: usual share of whatever free time is left, so a workday isn't
-   *    compared against an average that includes weekend socializing.
-   */
-  private baseline({ date, categories, insights, fixedBlocks }: OptimizerInput): Record<string, number> {
-    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
-    const planned = minutesByCategory(fixedBlocks, date);
-    const out: Record<string, number> = {};
-    let committed = 0;
-    for (const c of categories) {
-      const stats = insights.byCategory[c.id];
-      if (c.flexibility === 'fixed') out[c.id] = planned[c.id] || (stats?.avgMinutesByWeekday[weekday] ?? 0);
-      else if (c.flexibility === 'essential') out[c.id] = stats?.avgMinutesPerDay ?? 0;
-      else continue;
-      committed += out[c.id]!;
-    }
-    const free = Math.max(0, MINUTES_PER_DAY - committed);
-    for (const c of categories.filter((c) => c.flexibility === 'flexible')) {
-      out[c.id] = (insights.byCategory[c.id]?.shareOfFreeTime ?? 0) * free;
-    }
-    return out;
   }
 
   // -- Phase 2: placement -----------------------------------------------------
@@ -278,4 +253,33 @@ function circularDistance(a: number, b: number): number {
 
 function sum(xs: number[]): number {
   return xs.reduce((a, b) => a + b, 0);
+}
+
+/**
+ * The user's *typical* version of this particular day, before any changes:
+ *  - fixed: what's on the calendar, else this weekday's history (work Mon–Fri)
+ *  - essential: usual daily average (sleep doesn't shrink on workdays)
+ *  - flexible: usual share of whatever free time is left on this weekday, so a
+ *    workday isn't compared against an average that includes weekend socializing.
+ */
+export function typicalDay({ date, categories, insights, fixedBlocks }: OptimizerInput): Record<string, number> {
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const planned = minutesByCategory(fixedBlocks, date);
+  const out: Record<string, number> = {};
+  let committed = 0;
+  for (const c of categories) {
+    const stats = insights.byCategory[c.id];
+    if (c.flexibility === 'fixed') out[c.id] = planned[c.id] || (stats?.avgMinutesByWeekday[weekday] ?? 0);
+    else if (c.flexibility === 'essential') out[c.id] = stats?.avgMinutesPerDay ?? 0;
+    else continue;
+    committed += out[c.id]!;
+  }
+  const free = Math.max(0, MINUTES_PER_DAY - committed);
+  for (const c of categories.filter((c) => c.flexibility === 'flexible')) {
+    const stats = insights.byCategory[c.id];
+    // Prefer this weekday's own pattern; fall back to all days if it has no history.
+    const share = insights.daysByWeekday[weekday] ? stats?.shareOfFreeTimeByWeekday[weekday] : stats?.shareOfFreeTime;
+    out[c.id] = (share ?? 0) * free;
+  }
+  return out;
 }

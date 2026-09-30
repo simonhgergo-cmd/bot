@@ -21,6 +21,7 @@ Requires Node ≥ 22.18, which runs `.ts` files directly.
 | Feature | What the user does | Where it lives |
 |---|---|---|
 | **1. Main calendar** | Adds events like in any calendar. At the end of the day, answers a short form about the unlogged gaps ("What were you doing 17:00–19:00?"). Likely answers are ranked first, so most questions take one tap. | `calendar/`, `review/` |
+| **4. Routine calendar** | Your ideal week as editable templates (*Weekdays*, *Weekend*). The optimizer writes the first version. You add, move, resize or delete blocks, see live goal checks, and can re-plan the rest around your edits. Each day's plan is its routine with your calendar events on top. | `routine/` |
 | **2. Optimal-day calendar** | Views a second calendar showing what the day could look like, with the reasoning ("Scrolling: 2h12m → 1h to meet goal…"). It unlocks after 7 well-logged days. | `insights/`, `optimizer/` |
 | **3. Goals** | Sets targets such as *sleep ≥ 8h/day*, *scrolling ≤ 1h/day*, *exercise ≥ 150 min/week*, and tracks progress and streaks. | `goals/` |
 
@@ -28,6 +29,7 @@ Requires Node ≥ 22.18, which runs `.ts` files directly.
 
 ![Today, evening review, optimal day](design/mobile-1.png)
 ![Suggestions, goals, new goal](design/mobile-2.png)
+![Routine, edit a block, live check](design/mobile-3.png)
 
 Mockups are drawn from real engine output on the demo data. There are four
 tabs:
@@ -36,7 +38,10 @@ tabs:
 |---|---|---|
 | **Today** | Day timeline. Unlogged gaps are dashed, and a banner links to the review. Use `+` to add an event. | `day`, `addBlock`, `startReview` |
 | ↳ | **Evening review**: one question per screen, with big tap targets. The usual activity for that time is listed first. The user can split a gap or skip it. | `startReview`, `submitReview` |
-| **Plan** | Tomorrow's optimal day, with a toggle to see your usual day. Changed activities get a +/− badge. The hero card shows time won back. | `optimalDay`, `compare` |
+| **Plan › Tomorrow** | Tomorrow's plan. Changed activities get a +/− badge, and the hero card shows time won back. | `planForDate` (or `optimalDay` before a routine exists) |
+| **Plan › Routine** | The editable routine: switch between Weekdays and Weekend, see goal checks at the top, and tap `+` or a block to edit. | `routines`, `generateRoutines`, `checkRoutine` |
+| ↳ | **Edit block** sheet: activity, start/end in 5-minute steps, what the block takes time from, and a goal warning before saving. | `placeRoutineBlock`, `removeRoutineBlock` |
+| ↳ | **Live check**: if an edit breaks a goal, offer "Re-plan around my edits". Edited blocks (✎) stay put. | `checkRoutine`, `generateRoutines` |
 | ↳ | **Why this plan**: each suggestion with *Try it* / *Not for me*, plus "Put this plan on tomorrow". | `optimalDay().suggestions` |
 | **Goals** | This week's hits and misses and streaks. New goals are written as a sentence: "I want to [Sleep] [at least] [8h] [every day]". | `goals`, `goalProgress`, `setGoal` |
 | **Me** | Categories (enjoyment/flexibility), settings, data export. | `saveCategory`, settings |
@@ -54,8 +59,8 @@ tabs:
 - **Calendar import.** Read the device calendar (expo-calendar) into blocks
   with `source: 'import'`, so meetings don't have to be typed in twice.
 - **Needed from the engine next:** accept/reject state for suggestions ("Try
-  it" / "Not for me"), and "apply plan" to copy an optimal day into the
-  calendar as planned blocks.
+  it" / "Not for me"), and letting a routine block be marked as locked
+  (can't be re-planned) without editing it.
 
 ## Architecture
 
@@ -67,6 +72,7 @@ src/
   goals/       goals.ts           per-period progress, streaks (pure)
   insights/    insights.ts        learns the typical day from history (pure)
   optimizer/   optimizer.ts       Optimizer interface + GreedyOptimizer (pure)
+  routine/     routine.ts         editable routine: place/trim blocks, plan per date (pure)
   storage/     repository.ts      persistence interface
                memoryRepository.ts, jsonFileRepository.ts
   app/         timebackApp.ts     facade: the only thing a UI calls
@@ -96,6 +102,24 @@ src/
   average. Flexible time is the user's usual *share of free time*. Without
   this, a workday gets compared against weekend socializing and the plan
   overflows 24h. The demo exposed exactly this problem in an earlier version.
+
+### How the routine works
+
+- **A routine is the clock face of its weekdays.** "Sleep 23:00–07:00" in
+  *Weekdays* means every weekday has sleep 00:00–07:00 and 23:00–24:00. Each
+  date uses only its own routine, so there are no gaps or double-booked
+  hours where weekdays meet the weekend.
+- **One editing primitive: place a block.** Adding, moving, resizing and
+  changing the activity are all "place this block". It wins where it
+  overlaps, and neighbours are trimmed or split. Moving a block can leave
+  unplanned time, which is allowed and reported.
+- **Edits are sticky.** Placed blocks are marked `edited`.
+  `generateRoutines` re-plans everything else around them, so a user can
+  pin "Reading 21:00–22:00" and let the app fit the rest.
+- **The plan for a date** is its routine, with the calendar's fixed or locked
+  events cut in on top (a dentist at 15:00 replaces part of work).
+- **`adherence(date)`** is the share of logged minutes that matched the plan.
+  It's the basis for measuring whether the routine is working.
 
 ### How the optimal day is built
 
