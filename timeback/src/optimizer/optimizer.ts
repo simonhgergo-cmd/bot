@@ -34,6 +34,9 @@ export interface Optimizer {
 const SLOT = 15;
 const SLOTS = MINUTES_PER_DAY / SLOT;
 const DEFAULT_ANCHOR_MINUTE = 12 * 60;
+/** Shortest block the optimizer creates on purpose (unless the whole budget is smaller). */
+const MIN_CHUNK = 30;
+const MIN_CHUNK_SLOTS = MIN_CHUNK / SLOT;
 
 type Driver = 'goal' | 'reduce' | 'reclaim' | 'squeeze';
 
@@ -110,14 +113,26 @@ export class GreedyOptimizer implements Optimizer {
     let leftover = MINUTES_PER_DAY - sum(Object.values(budgets));
 
     if (leftover > 0) {
-      // Freed time goes to what the user loves, weighted by how much they already do it.
+      // Freed time goes to what the user loves, weighted by how much they already
+      // do it, handed out in whole chunks so nobody gets a useless 15-minute crumb.
       const loved = categories.filter((c) => c.enjoyment === 'loves' && c.flexibility !== 'fixed');
-      const weights = loved.map((c) => Math.max(baseline[c.id] ?? 0, SLOT));
-      const total = sum(weights);
-      loved.forEach((c, i) => {
-        budgets[c.id]! += (leftover * weights[i]!) / total;
+      const weight = (c: Category) => Math.max(baseline[c.id] ?? 0, SLOT);
+      const extra: Record<string, number> = {};
+      let remaining = Math.floor(leftover / SLOT) * SLOT;
+      while (loved.length && remaining > 0) {
+        // D'Hondt: next chunk to whoever has the most weight per chunk already received.
+        // A final sub-chunk remainder tops up an activity that already got time.
+        const byQuota = [...loved].sort((a, b) => weight(b) / ((extra[b.id] ?? 0) + MIN_CHUNK) - weight(a) / ((extra[a.id] ?? 0) + MIN_CHUNK));
+        const chunk = remaining >= MIN_CHUNK ? MIN_CHUNK : remaining;
+        const next = chunk < MIN_CHUNK ? ([...loved].sort((a, b) => (extra[b.id] ?? 0) - (extra[a.id] ?? 0))[0]!) : byQuota[0]!;
+        extra[next.id] = (extra[next.id] ?? 0) + chunk;
+        remaining -= chunk;
+      }
+      for (const c of loved) {
+        if (!extra[c.id]) continue;
+        budgets[c.id]! += extra[c.id]!;
         drivers[c.id] ??= 'reclaim';
-      });
+      }
       if (loved.length) leftover = 0;
     } else if (leftover < 0) {
       // Over-committed (e.g. ambitious goals): shrink the least valuable time first.
@@ -167,23 +182,29 @@ export class GreedyOptimizer implements Optimizer {
       c.flexibility === 'fixed' ? 0 : c.flexibility === 'essential' ? 1 : c.enjoyment === 'loves' ? 3 : 2;
     const ordered = [...categories].sort((a, b) => rank(a) - rank(b));
 
+    const needs: Record<string, number> = {};
+    for (const c of ordered) needs[c.id] = (budgets[c.id] ?? 0) / SLOT - grid.filter((g) => g === c.id).length;
+    let holesFilled = false;
+
     for (const c of ordered) {
+      if (!holesFilled && rank(c) >= 2) {
+        // Commitments are placed; hand each small leftover hole to one free-time
+        // activity whole, instead of letting the last activity inherit the scraps.
+        fillSmallHoles(grid, ordered.filter((x) => rank(x) >= 2), needs, insights);
+        holesFilled = true;
+      }
       const stats = insights.byCategory[c.id];
       const profile = stats?.slotProfile ?? [];
       const anchor = Math.round((stats?.typicalStartMinute ?? DEFAULT_ANCHOR_MINUTE) / SLOT) % SLOTS;
-      let need = (budgets[c.id] ?? 0) / SLOT - grid.filter((g) => g === c.id).length;
-      while (need-- > 0) {
-        // Prefer slots the user usually spends on this; then grow existing chunks; then near the usual start.
-        let best = -1;
-        let bestScore = Number.NEGATIVE_INFINITY;
-        for (let i = 0; i < SLOTS; i++) {
-          if (grid[i] !== null) continue;
-          const adjacent = grid[(i + SLOTS - 1) % SLOTS] === c.id || grid[(i + 1) % SLOTS] === c.id;
-          const score = (profile[i] ?? 0) * 100 + (adjacent ? 10 : 0) - circularDistance(i, anchor) / SLOTS;
-          if (score > bestScore) [best, bestScore] = [i, score];
-        }
-        if (best === -1) break;
-        grid[best] = c.id;
+      if ((needs[c.id] ?? 0) <= 0) continue;
+      // One chunk per time of day the user usually does this (meals: breakfast + dinner).
+      const queue = splitIntoChunks(needs[c.id]!, episodes(profile), anchor);
+      while (queue.length) {
+        const { size, center } = queue.shift()!;
+        const placed = placeChunk(grid, c.id, size, center, profile);
+        needs[c.id]! -= placed;
+        if (placed === 0) break; // day is full
+        if (placed < size) queue.unshift({ size: size - placed, center });
       }
     }
 
@@ -197,6 +218,11 @@ export class GreedyOptimizer implements Optimizer {
         if (donor !== -1) grid[i] = grid[donor]!;
       }
     }
+
+    // Reorder neighbouring free-time blocks when that joins pieces of the same
+    // activity ([friends][phone][friends] → [phone][friends friends]). Minutes are unchanged.
+    const movable = new Set(ordered.filter((c) => rank(c) >= 2).map((c) => c.id));
+    joinPieces(grid, locked, movable);
 
     const out: OptimalDay['blocks'] = fixedBlocks.map((b) => ({
       start: fromMinutes(Math.max(ds, toMinutes(b.start))),
@@ -243,6 +269,143 @@ export class GreedyOptimizer implements Optimizer {
       }
     }
     return out.sort((a, b) => Math.abs(b.deltaMinutes) - Math.abs(a.deltaMinutes));
+  }
+}
+
+interface Episode {
+  start: number;
+  len: number;
+  weight: number;
+}
+
+/**
+ * The separate times of day the user usually does something: circular runs
+ * of slots where the learned profile is clearly above noise.
+ */
+function episodes(profile: number[]): Episode[] {
+  const max = Math.max(0, ...profile);
+  if (max === 0) return [];
+  const on = profile.map((p) => p >= Math.max(0.15, max * 0.25));
+  if (on.every(Boolean)) return [{ start: 0, len: SLOTS, weight: sum(profile) }];
+  const firstOff = on.indexOf(false);
+  const out: Episode[] = [];
+  for (let k = 1; k <= SLOTS; k++) {
+    const i = (firstOff + k) % SLOTS;
+    if (!on[i]) continue;
+    const prev = (i + SLOTS - 1) % SLOTS;
+    if (!on[prev] || out.length === 0) out.push({ start: i, len: 0, weight: 0 });
+    const ep = out.at(-1)!;
+    ep.len++;
+    ep.weight += profile[i]!;
+  }
+  return out;
+}
+
+/** Split `need` slots across episodes by weight, dropping any share below the minimum chunk. */
+function splitIntoChunks(need: number, eps: Episode[], anchor: number): Array<{ size: number; center: number }> {
+  const center = (e: Episode) => (e.start + Math.floor(e.len / 2)) % SLOTS;
+  let chosen = [...eps].sort((a, b) => b.weight - a.weight);
+  if (chosen.length === 0 || need < 2 * MIN_CHUNK_SLOTS) {
+    return [{ size: need, center: chosen[0] ? center(chosen[0]) : anchor }];
+  }
+  for (;;) {
+    const total = sum(chosen.map((e) => e.weight));
+    const sizes = chosen.map((e) => Math.round((need * e.weight) / total));
+    const smallest = sizes.indexOf(Math.min(...sizes));
+    if (sizes[smallest]! >= MIN_CHUNK_SLOTS || chosen.length === 1) {
+      sizes[0]! += need - sum(sizes); // rounding remainder goes to the main episode
+      return chosen.map((e, i) => ({ size: sizes[i]!, center: center(e) })).filter((x) => x.size > 0);
+    }
+    chosen = chosen.filter((_, i) => i !== smallest);
+  }
+}
+
+/**
+ * Place up to `size` contiguous slots for `id`: the free window that best
+ * matches the user's usual timing, stays near `center`, and ideally joins an
+ * existing block of the same activity. If no window is big enough, fill the
+ * best-fitting free run and return how much was placed.
+ */
+function placeChunk(grid: Array<string | null>, id: string, size: number, center: number, profile: number[]): number {
+  const runs = freeRuns(grid);
+  if (runs.length === 0) return 0;
+
+  const fits = runs.filter((r) => r.len >= size);
+  const pool = fits.length ? fits : runs;
+  let best = { start: -1, len: 0, score: Number.NEGATIVE_INFINITY };
+  for (const r of pool) {
+    const len = Math.min(size, r.len);
+    for (let off = 0; off + len <= r.len; off++) {
+      const s0 = (r.start + off) % SLOTS;
+      let fit = 0;
+      for (let k = 0; k < len; k++) fit += profile[(s0 + k) % SLOTS] ?? 0;
+      const before = grid[(s0 + SLOTS - 1) % SLOTS];
+      const after = grid[(s0 + len) % SLOTS];
+      const joins = before === id || after === id;
+      // Packing: sitting flush against other blocks leaves fewer, larger holes.
+      const flush = (before != null ? 0.5 : 0) + (after != null ? 0.5 : 0);
+      // Without a fitting window, prefer the biggest run so the activity splits into as few pieces as possible.
+      const score = fit + (joins ? 1 : 0) + flush - circularDistance((s0 + Math.floor(len / 2)) % SLOTS, center) * 0.05 + (fits.length ? 0 : len);
+      if (score > best.score) best = { start: s0, len, score };
+    }
+  }
+  for (let k = 0; k < best.len; k++) grid[(best.start + k) % SLOTS] = id;
+  return best.len;
+}
+
+/** Swap adjacent movable runs while that reduces the number of pieces. */
+function joinPieces(grid: Array<string | null>, locked: boolean[], movable: Set<string>) {
+  for (let guard = 0; guard < SLOTS; guard++) {
+    const runs: Array<{ id: string | null; start: number; len: number; locked: boolean }> = [];
+    grid.forEach((id, i) => {
+      const last = runs.at(-1);
+      if (last && last.id === id && last.locked === locked[i]) last.len++;
+      else runs.push({ id, start: i, len: 1, locked: locked[i]! });
+    });
+    const canMove = (r?: { id: string | null; locked: boolean }) => !!r && !r.locked && r.id !== null && movable.has(r.id);
+    let swapped = false;
+    for (let i = 0; i + 1 < runs.length && !swapped; i++) {
+      const [a, b] = [runs[i]!, runs[i + 1]!];
+      if (!canMove(a) || !canMove(b)) continue;
+      const gain = Number(runs[i - 1]?.id === b.id) + Number(runs[i + 2]?.id === a.id);
+      if (gain === 0) continue;
+      for (let k = 0; k < b.len; k++) grid[a.start + k] = b.id;
+      for (let k = 0; k < a.len; k++) grid[a.start + b.len + k] = a.id;
+      swapped = true;
+    }
+    if (!swapped) return;
+  }
+}
+
+/** Maximal runs of empty slots on the circular grid. */
+function freeRuns(grid: Array<string | null>): Array<{ start: number; len: number }> {
+  if (grid.every((g) => g === null)) return [{ start: 0, len: SLOTS }];
+  const runs: Array<{ start: number; len: number }> = [];
+  const firstTaken = grid.findIndex((g) => g !== null);
+  for (let k = 1; k <= SLOTS; k++) {
+    const i = (firstTaken + k) % SLOTS;
+    if (grid[i] !== null) continue;
+    if (grid[(i + SLOTS - 1) % SLOTS] !== null) runs.push({ start: i, len: 0 });
+    runs.at(-1)!.len++;
+  }
+  return runs;
+}
+
+/** Give each hole of 30–60 min wholly to the free-time activity that fits it best and still needs that much. */
+function fillSmallHoles(grid: Array<string | null>, candidates: Category[], needs: Record<string, number>, insights: Insights) {
+  for (const run of freeRuns(grid)) {
+    if (run.len < MIN_CHUNK_SLOTS || run.len > 2 * MIN_CHUNK_SLOTS) continue;
+    const fit = (c: Category) => {
+      let f = 0;
+      for (let k = 0; k < run.len; k++) f += insights.byCategory[c.id]?.slotProfile[(run.start + k) % SLOTS] ?? 0;
+      return f;
+    };
+    const pick = candidates
+      .filter((c) => (needs[c.id] ?? 0) >= run.len)
+      .sort((a, b) => fit(b) - fit(a) || needs[b.id]! - needs[a.id]!)[0];
+    if (!pick) continue;
+    for (let k = 0; k < run.len; k++) grid[(run.start + k) % SLOTS] = pick.id;
+    needs[pick.id]! -= run.len;
   }
 }
 

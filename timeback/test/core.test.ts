@@ -77,3 +77,26 @@ test('circular mean handles midnight', () => {
   assert.equal(circularMeanMinute([23 * 60 + 30, 30]), 0);
   assert.equal(circularMeanMinute([22 * 60, 23 * 60]), 22 * 60 + 30);
 });
+
+test('optimizer rounds goal targets toward the goal, never away from it', async () => {
+  const { GreedyOptimizer } = await import('../src/optimizer/optimizer.ts');
+  const { analyze } = await import('../src/insights/insights.ts');
+  const { DEFAULT_SETTINGS } = await import('../src/domain/types.ts');
+  // Nothing "loved", so no freed time is handed out that could mask rounding.
+  const categories = [
+    { id: 'exercise', name: 'Exercise', enjoyment: 'neutral' as const, flexibility: 'flexible' as const },
+    { id: 'rest', name: 'Rest', enjoyment: 'neutral' as const, flexibility: 'flexible' as const },
+  ];
+  const history = [block('2026-09-29T00:00', '2026-09-30T00:00', 'rest')];
+  const goals: Goal[] = [
+    { id: 'e', label: 'Exercise 150/wk', categoryId: 'exercise', comparison: 'atLeast', targetMinutes: 150, period: 'week', active: true },
+    { id: 'r', label: 'Rest ≤ 23h50', categoryId: 'rest', comparison: 'atMost', targetMinutes: 23 * 60 + 50, period: 'day', active: true },
+  ];
+  const plan = new GreedyOptimizer().plan({
+    date: '2026-09-30', categories, goals, fixedBlocks: [], settings: DEFAULT_SETTINGS,
+    insights: analyze(history, ['2026-09-29'], categories),
+  });
+  const minutes = minutesByCategory(plan.blocks.map((b, i) => ({ ...b, id: `${i}`, source: 'user' as const })), '2026-09-30');
+  assert.ok(minutes.exercise! * 7 >= 150, `exercise ${minutes.exercise} min/day`); // 150/7 ≈ 21.4 → 30, not 15
+  assert.ok(minutes.rest! <= 23 * 60 + 50, `rest ${minutes.rest} min/day`); // 1430 → 1425, not 1430 rounded up
+});

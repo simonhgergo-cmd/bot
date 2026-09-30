@@ -111,14 +111,16 @@ test('app: an edit that breaks a weekly goal is repaired by re-planning around i
   await app.setGoal({ label: 'Max 1h scrolling', categoryId: 'scrolling', comparison: 'atMost', targetMinutes: 60, period: 'day' });
   const [weekdays] = (await app.generateRoutines(today, `${today}T20:00`))!;
 
-  // Reading 21:00–22:00 on weekdays eats into the evening exercise slot.
-  const edited = await app.placeRoutineBlock(weekdays!.id, { start: '21:00', end: '22:00', categoryId: 'hobby', title: 'Reading' });
+  // Reading replaces all weekday exercise: 5 days × 0 + weekend alone is below 150/week.
+  const exercise = weekdays!.blocks.filter((b) => b.categoryId === 'exercise');
+  assert.equal(exercise.length, 1);
+  const { start, end } = exercise[0]!;
+  const edited = await app.placeRoutineBlock(weekdays!.id, { start, end, categoryId: 'hobby', title: 'Reading' });
   assert.equal((await app.checkRoutine(edited.id, today)).goals[0]!.met, false);
 
-  // Re-planning keeps the edit and must win the goal back (a weekly goal rounded
-  // down to 15 min/day used to leave it at 135 of 150 min).
+  // Re-planning keeps the edit and must win the goal back.
   const [replanned] = (await app.generateRoutines(today, `${today}T21:00`))!;
   const check = await app.checkRoutine(replanned!.id, today);
   assert.equal(check.goals[0]!.met, true, `planned ${check.goals[0]!.plannedMinutes} min/week`);
-  assert.ok(replanned!.blocks.some((b) => b.title === 'Reading' && b.start === '21:00' && b.edited));
+  assert.ok(replanned!.blocks.some((b) => b.title === 'Reading' && b.start === start && b.edited));
 });

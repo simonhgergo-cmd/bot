@@ -69,3 +69,27 @@ test('JSON file repository persists across instances', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('plans are not fragmented: no block under 30 min, and no activity scattered', async () => {
+  const { blockMinutes } = await import('../src/routine/routine.ts');
+  const app = await seededApp(TODAY);
+  await app.setGoal({ label: 'Sleep 8h', categoryId: 'sleep', comparison: 'atLeast', targetMinutes: 480, period: 'day' });
+  await app.setGoal({ label: 'Scrolling ≤ 1h', categoryId: 'scrolling', comparison: 'atMost', targetMinutes: 60, period: 'day' });
+  await app.setGoal({ label: 'Exercise 150/wk', categoryId: 'exercise', comparison: 'atLeast', targetMinutes: 150, period: 'week' });
+  await app.addBlock({ start: '2026-10-01T09:00', end: '2026-10-01T17:00', categoryId: 'work' });
+
+  const check = (label: string, blocks: Array<{ categoryId: string; minutes: number }>) => {
+    const short = blocks.filter((b) => b.minutes < 30);
+    assert.deepEqual(short, [], `${label}: blocks under 30 min`);
+    const pieces: Record<string, number> = {};
+    for (const b of blocks) pieces[b.categoryId] = (pieces[b.categoryId] ?? 0) + 1;
+    // Two pieces is legitimate (breakfast + dinner, commute there + back); more is scattering.
+    for (const [id, n] of Object.entries(pieces)) assert.ok(n <= 2, `${label}: ${id} split into ${n} pieces`);
+  };
+  const plan = (await app.optimalDay('2026-10-01'))!;
+  check('tomorrow', plan.blocks.filter((b) => b.origin === 'planned' && b.categoryId !== 'sleep') // sleep is split by midnight in a day view
+    .map((b) => ({ categoryId: b.categoryId, minutes: toMinutes(b.end) - toMinutes(b.start) })));
+  for (const r of (await app.generateRoutines(TODAY, `${TODAY}T20:00`))!) {
+    check(r.name, r.blocks.map((b) => ({ categoryId: b.categoryId, minutes: blockMinutes(b) })));
+  }
+});
