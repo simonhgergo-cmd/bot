@@ -52,6 +52,28 @@ test('a brand-new loved activity with no history gets planned, in its preferred 
   assert.ok(inRoutine.length > 0 && inRoutine.every((b) => blockMinutes(b) >= 45));
 });
 
+test('a new loved activity still gets a session when goals use up the freed time', async () => {
+  const app = await seededApp(TODAY);
+  // These goals consume nearly all time freed by cutting scrolling.
+  await app.setGoal({ label: 'Sleep 8h', categoryId: 'sleep', comparison: 'atLeast', targetMinutes: 480, period: 'day' });
+  await app.setGoal({ label: 'Max 1h scrolling', categoryId: 'scrolling', comparison: 'atMost', targetMinutes: 60, period: 'day' });
+  await app.setGoal({ label: 'Exercise 150/wk', categoryId: 'exercise', comparison: 'atLeast', targetMinutes: 150, period: 'week' });
+  const guitar = await app.addActivity({ name: 'Guitar', enjoyment: 'loves', preferredTimes: [EVENING], sessionMinutes: 45 });
+  await app.addBlock({ start: `${TOMORROW}T09:00`, end: `${TOMORROW}T17:00`, categoryId: 'work' });
+
+  const plan = (await app.optimalDay(TOMORROW))!;
+  assert.ok(minutesOf(plan.blocks, guitar.id) >= 45, `guitar got ${minutesOf(plan.blocks, guitar.id)} min`);
+  // Goals still hold.
+  assert.ok(minutesOf(plan.blocks, 'sleep') >= 480);
+  assert.ok(minutesOf(plan.blocks, 'scrolling') <= 60);
+  // The time came from a neutral/disliked activity, and the plan says so.
+  assert.ok(plan.suggestions.some((s) => s.kind === 'reduce' || s.kind === 'meetGoal'));
+  // No sliver was left behind in the donor.
+  for (const b of plan.blocks.filter((b) => b.origin === 'planned' && b.categoryId !== 'sleep')) {
+    assert.ok(toMinutes(b.end) - toMinutes(b.start) >= 30, `${b.categoryId} ${b.start}–${b.end}`);
+  }
+});
+
 test('goals on a custom activity are met in whole sessions', async () => {
   const app = await seededApp(TODAY);
   const reading = await app.addActivity({ name: 'Reading', preferredTimes: [{ start: '21:00', end: '23:00' }], sessionMinutes: 40 });

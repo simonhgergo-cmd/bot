@@ -175,6 +175,29 @@ export class GreedyOptimizer implements Optimizer {
     }
 
     for (const id of Object.keys(budgets)) budgets[id] = Math.round(budgets[id]! / SLOT) * SLOT;
+
+    // A loved activity the user said when they'd like to do (typically one they
+    // just added) should get at least one session, even when goals used up the
+    // freed time. Take it whole from one neutral or disliked free-time activity
+    // that can spare it without going below its floor or leaving a sliver.
+    for (const c of categories) {
+      if (c.enjoyment !== 'loves' || !c.preferredTimes?.length || keep.has(c.id) || c.flexibility === 'fixed') continue;
+      const need = chunkMinutes(c) - (budgets[c.id] ?? 0);
+      if (need <= 0) continue;
+      const donor = categories
+        .filter((d) => d.flexibility === 'flexible' && d.enjoyment !== 'loves' && !keep.has(d.id))
+        .filter((d) => {
+          const left = (budgets[d.id] ?? 0) - need;
+          return left >= (floor[d.id] ?? 0) && (left === 0 || left >= MIN_CHUNK);
+        })
+        // Disliked first, then whoever has the most time to spare.
+        .sort((a, b) => Number(b.enjoyment === 'dislikes') - Number(a.enjoyment === 'dislikes') || budgets[b.id]! - budgets[a.id]!)[0];
+      if (!donor) continue;
+      budgets[donor.id]! -= need;
+      budgets[c.id] = (budgets[c.id] ?? 0) + need;
+      drivers[c.id] ??= 'reclaim';
+      drivers[donor.id] ??= 'reduce';
+    }
     return { budgets, drivers, goalFor, baseline };
   }
 
