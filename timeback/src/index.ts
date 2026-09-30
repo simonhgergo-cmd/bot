@@ -8,5 +8,5 @@ export { analyze, wellLoggedDays } from './insights/insights.ts';
 export { GreedyOptimizer, type Optimizer, type OptimizerInput } from './optimizer/optimizer.ts';
 export type { Repository } from './storage/repository.ts';
 export { MemoryRepository } from './storage/memoryRepository.ts';
-export { JsonFileRepository } from './storage/jsonFileRepository.ts';
+// JsonFileRepository is Node-only (dev/demo); import it directly from './storage/jsonFileRepository.ts'.
 export { TimebackApp, type DayComparison } from './app/timebackApp.ts';

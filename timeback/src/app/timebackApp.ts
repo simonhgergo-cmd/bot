@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type {
   Category,
   DateKey,
@@ -46,7 +45,8 @@ export class TimebackApp {
     this.repo = repo;
     this.historyDays = opts.historyDays ?? 28;
     this.optimizer = opts.optimizer ?? new GreedyOptimizer();
-    this.newId = opts.newId ?? randomUUID;
+    // Web Crypto: global in Node, browsers and Hermes (React Native) with a polyfill.
+    this.newId = opts.newId ?? (() => globalThis.crypto.randomUUID());
   }
 
   // -- Setup ------------------------------------------------------------------

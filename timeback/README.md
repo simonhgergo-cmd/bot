@@ -4,8 +4,8 @@ A calendar that learns how you actually spend your day and, once it has enough
 data, proposes an **optimal day** that wins back time for the things you enjoy.
 
 This folder is the application **spine**: the domain model, core logic, and
-one service API. It has no UI yet. Every UI (web, mobile, CLI) is meant to
-call `TimebackApp`.
+one service API. It is built to be a **phone app**, but has no UI yet; the
+screens are designed (see below) and will call `TimebackApp`.
 
 ```
 npm install        # dev tooling only (typescript); runtime has zero dependencies
@@ -23,6 +23,39 @@ Requires Node ≥ 22.18, which runs `.ts` files directly.
 | **1. Main calendar** | Adds events like in any calendar. At the end of the day, answers a short form about the unlogged gaps ("What were you doing 17:00–19:00?"). Likely answers are ranked first, so most questions take one tap. | `calendar/`, `review/` |
 | **2. Optimal-day calendar** | Views a second calendar showing what the day could look like, with the reasoning ("Scrolling: 2h12m → 1h to meet goal…"). It unlocks after 7 well-logged days. | `insights/`, `optimizer/` |
 | **3. Goals** | Sets targets such as *sleep ≥ 8h/day*, *scrolling ≤ 1h/day*, *exercise ≥ 150 min/week*, and tracks progress and streaks. | `goals/` |
+
+## Phone app design
+
+![Today, evening review, optimal day](design/mobile-1.png)
+![Suggestions, goals, new goal](design/mobile-2.png)
+
+Mockups are drawn from real engine output on the demo data. There are four
+tabs:
+
+| Tab | Screen | Engine call |
+|---|---|---|
+| **Today** | Day timeline. Unlogged gaps are dashed, and a banner links to the review. Use `+` to add an event. | `day`, `addBlock`, `startReview` |
+| ↳ | **Evening review**: one question per screen, with big tap targets. The usual activity for that time is listed first. The user can split a gap or skip it. | `startReview`, `submitReview` |
+| **Plan** | Tomorrow's optimal day, with a toggle to see your usual day. Changed activities get a +/− badge. The hero card shows time won back. | `optimalDay`, `compare` |
+| ↳ | **Why this plan**: each suggestion with *Try it* / *Not for me*, plus "Put this plan on tomorrow". | `optimalDay().suggestions` |
+| **Goals** | This week's hits and misses and streaks. New goals are written as a sentence: "I want to [Sleep] [at least] [8h] [every day]". | `goals`, `goalProgress`, `setGoal` |
+| **Me** | Categories (enjoyment/flexibility), settings, data export. | `saveCategory`, settings |
+
+### Platform plan
+
+- **React Native + Expo.** The core is plain TypeScript with no Node-only
+  imports, so it runs unchanged in the app. `JsonFileRepository` is a Node
+  dev/demo adapter only and is not exported from `src/index.ts`.
+- **Local-first storage.** Add a `SqliteRepository` (expo-sqlite)
+  implementing `Repository`. All data stays on the phone, and sync is optional
+  later.
+- **Evening review notification.** Schedule a local notification (for example
+  21:30, configurable) when `pendingReviews()` or today's gaps are non-empty.
+- **Calendar import.** Read the device calendar (expo-calendar) into blocks
+  with `source: 'import'`, so meetings don't have to be typed in twice.
+- **Needed from the engine next:** accept/reject state for suggestions ("Try
+  it" / "Not for me"), and "apply plan" to copy an optimal day into the
+  calendar as planned blocks.
 
 ## Architecture
 
@@ -79,10 +112,10 @@ src/
 
 ## Known limitations / next steps
 
-- **UI.** A two-pane calendar (actual | optimal) plus the review form and a
-  goals screen. `TimebackApp` already exposes everything these need.
-- **End-of-day reminder.** `pendingReviews(today)` returns the days that need
-  a review. A scheduler or push notification still has to call it.
+- **Phone UI.** Designed (see above), not built yet.
+- **Fragmented placement.** Short activities can be split into 15-minute
+  pieces (chores in the mockup). Placement should prefer one contiguous
+  block per activity.
 - **Recurring events and calendar import** (Google/ICS), via `source: 'import'`.
 - **Multi-occurrence categories.** Meals are placed as a learned pattern but
   budgeted as one daily total, with no "3 meals" rule.
