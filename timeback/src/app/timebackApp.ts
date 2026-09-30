@@ -23,6 +23,10 @@ import { currentStreak, evaluateGoal, periodBounds } from '../goals/goals.ts';
 import { analyze, wellLoggedDays } from '../insights/insights.ts';
 import { GreedyOptimizer, typicalDay, type Optimizer } from '../optimizer/optimizer.ts';
 import * as routineOps from '../routine/routine.ts';
+import { activityId, toCategory, validateActivity, type ActivityInput } from '../activities/activities.ts';
+
+/** Range that covers every stored block (for merges and usage checks). */
+const ALL_TIME = ['0000-01-01T00:00', '9999-12-31T23:59'] as const;
 import type { Repository } from '../storage/repository.ts';
 
 export interface AppOptions {
@@ -68,12 +72,98 @@ export class TimebackApp {
 
   // -- Setup ------------------------------------------------------------------
 
+  /** All activities, including archived ones (their history still shows). */
   categories(): Promise<Category[]> {
     return this.repo.listCategories();
   }
 
+  /** Activities that can be logged, planned and offered in the review. */
+  async activeCategories(): Promise<Category[]> {
+    return (await this.repo.listCategories()).filter((c) => !c.archived);
+  }
+
+  /** Low-level upsert, used for the built-in defaults during onboarding. Prefer addActivity. */
   async saveCategory(category: Category): Promise<void> {
     await this.repo.saveCategory(category);
+  }
+
+  // -- Custom activities --------------------------------------------------------
+
+  /**
+   * Add an activity of the user's own ("Guitar", "Language app"). With no
+   * history yet, its preferred times and session length are what planning
+   * and the review use; real logs take over as they come in.
+   */
+  async addActivity(input: ActivityInput): Promise<Category> {
+    const existing = await this.repo.listCategories();
+    validateActivity(input, existing);
+    const category = toCategory(activityId(input.name, new Set(existing.map((c) => c.id))), input);
+    await this.repo.saveCategory(category);
+    return category;
+  }
+
+  /** Rename or change how the app treats an activity. The id (and so all history) stays. */
+  async updateActivity(id: string, patch: Partial<ActivityInput>): Promise<Category> {
+    const existing = await this.repo.listCategories();
+    const current = existing.find((c) => c.id === id);
+    if (!current) throw new Error(`Unknown activity ${id}`);
+    const merged: ActivityInput = { ...current, ...patch };
+    validateActivity(merged, existing, id);
+    const updated: Category = { ...toCategory(id, merged), ...(current.archived ? { archived: true } : {}) };
+    await this.repo.saveCategory(updated);
+    return updated;
+  }
+
+  /**
+   * Archive: stop planning it and offering it, but keep its history (past days
+   * still show it). Its usual time becomes free time in future plans.
+   */
+  async setArchived(id: string, archived: boolean): Promise<Category> {
+    const current = (await this.repo.listCategories()).find((c) => c.id === id);
+    if (!current) throw new Error(`Unknown activity ${id}`);
+    const { archived: _was, ...rest } = current;
+    const updated: Category = archived ? { ...rest, archived: true } : rest;
+    await this.repo.saveCategory(updated);
+    return updated;
+  }
+
+  /**
+   * Fold one activity into another ("Jogging" into "Exercise"): its logged
+   * time, goals and routine blocks move over, then it is removed.
+   */
+  async mergeActivities(fromId: string, intoId: string): Promise<{ blocks: number; goals: number; routines: number }> {
+    if (fromId === intoId) throw new Error('Pick two different activities');
+    const all = await this.repo.listCategories();
+    if (!all.some((c) => c.id === fromId)) throw new Error(`Unknown activity ${fromId}`);
+    await this.requireCategory(intoId);
+
+    const blocks = (await this.repo.listBlocks(ALL_TIME[0], ALL_TIME[1])).filter((b) => b.categoryId === fromId);
+    for (const b of blocks) await this.repo.saveBlock({ ...b, categoryId: intoId });
+    const goals = (await this.repo.listGoals()).filter((g) => g.categoryId === fromId);
+    for (const g of goals) await this.repo.saveGoal({ ...g, categoryId: intoId });
+    let routines = 0;
+    for (const r of await this.repo.listRoutines()) {
+      if (!r.blocks.some((b) => b.categoryId === fromId)) continue;
+      const blocksMoved = r.blocks.map((b) => (b.categoryId === fromId ? { ...b, categoryId: intoId } : b));
+      await this.repo.saveRoutine({ ...r, blocks: routineOps.normalize(blocksMoved) });
+      routines++;
+    }
+    // Decisions were about the old activity's suggestions; they don't carry over.
+    for (const d of await this.repo.listSuggestionDecisions()) {
+      if (d.categoryId === fromId) await this.repo.deleteSuggestionDecision(d.key);
+    }
+    await this.repo.deleteCategory(fromId);
+    return { blocks: blocks.length, goals: goals.length, routines };
+  }
+
+  /** Delete an activity that was never used. Anything with history should be archived or merged instead. */
+  async deleteActivity(id: string): Promise<void> {
+    const used =
+      (await this.repo.listBlocks(ALL_TIME[0], ALL_TIME[1])).some((b) => b.categoryId === id) ||
+      (await this.repo.listGoals()).some((g) => g.categoryId === id) ||
+      (await this.repo.listRoutines()).some((r) => r.blocks.some((b) => b.categoryId === id));
+    if (used) throw new Error('This activity has history. Archive it, or merge it into another one.');
+    await this.repo.deleteCategory(id);
   }
 
   // -- 1. Main calendar (used like a normal calendar) -------------------------
@@ -112,7 +202,7 @@ export class TimebackApp {
     const [settings, blocks, categories, insights] = await Promise.all([
       this.repo.getSettings(),
       this.day(date),
-      this.repo.listCategories(),
+      this.activeCategories(), // archived activities aren't offered as answers
       this.insights(date),
     ]);
     const until = now ? toMinutes(now) : undefined;
@@ -127,7 +217,7 @@ export class TimebackApp {
   async submitReview(date: DateKey, answers: ReviewAnswer[], completedAt: LocalDateTime): Promise<ReviewChanges> {
     const review = await this.repo.getReview(date);
     if (!review) throw new Error(`No review started for ${date}`);
-    const known = new Set((await this.repo.listCategories()).map((c) => c.id));
+    const known = new Set((await this.activeCategories()).map((c) => c.id));
     const changes = reviewChanges(review, answers, known, this.newId);
     const current = new Map((await this.day(date)).map((b) => [b.id, b]));
     for (const id of changes.remove) await this.repo.deleteBlock(id);
@@ -396,7 +486,7 @@ export class TimebackApp {
     const routine = await this.requireRoutine(routineId);
     const [all, categories, goals, settings, insights] = await Promise.all([
       this.repo.listRoutines(),
-      this.repo.listCategories(),
+      this.activeCategories(),
       this.repo.listGoals(),
       this.repo.getSettings(),
       this.insights(today),
@@ -456,8 +546,11 @@ export class TimebackApp {
     return r;
   }
 
+  /** The activity must exist and not be archived (new entries can't use archived activities). */
   private async requireCategory(id: string): Promise<void> {
-    if (!(await this.repo.listCategories()).some((c) => c.id === id)) throw new Error(`Unknown category ${id}`);
+    const c = (await this.repo.listCategories()).find((x) => x.id === id);
+    if (!c) throw new Error(`Unknown category ${id}`);
+    if (c.archived) throw new Error(`"${c.name}" is archived; unarchive it to use it again`);
   }
 }
 

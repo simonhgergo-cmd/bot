@@ -8,6 +8,7 @@ import type { Category, DateKey, DayReview, Goal, LocalDateTime, Routine, Settin
 export interface Repository {
   listCategories(): Promise<Category[]>;
   saveCategory(category: Category): Promise<void>;
+  deleteCategory(id: string): Promise<void>;
 
   /** Blocks that overlap [from, to). */
   listBlocks(from: LocalDateTime, to: LocalDateTime): Promise<TimeBlock[]>;

@@ -8,32 +8,19 @@ import type {
   TimeBlock,
   TimeOfDay,
 } from '../domain/types.ts';
-import { MINUTES_PER_DAY, dayWindow, fromMinutes, overlap, toMinutes } from '../domain/time.ts';
+import { MINUTES_PER_DAY, dayWindow, formatTime, fromMinutes, overlap, parseTime, toMinutes } from '../domain/time.ts';
 import { isMet } from '../goals/goals.ts';
+
+export { formatTime, parseTime };
 
 /**
  * Pure functions for the routine calendar. A routine lives on a 24h circle:
  * each block is an arc (start minute, length) that may wrap past midnight.
  */
 
-const STEP = 5;
-
 interface Arc {
   s: number; // 0..1439
   len: number; // 1..1440
-}
-
-export function parseTime(t: TimeOfDay): number {
-  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(t);
-  if (!m) throw new Error(`Invalid time of day: ${t}`);
-  const minutes = Number(m[1]) * 60 + Number(m[2]);
-  if (minutes % STEP) throw new Error(`Times must be multiples of ${STEP} minutes: ${t}`);
-  return minutes;
-}
-
-export function formatTime(minute: number): TimeOfDay {
-  const m = ((minute % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
-  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
 function arcOf(b: Pick<RoutineBlock, 'start' | 'end'>): Arc {

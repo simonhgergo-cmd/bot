@@ -21,12 +21,31 @@ export type Enjoyment = 'loves' | 'neutral' | 'dislikes';
  */
 export type Flexibility = 'fixed' | 'essential' | 'flexible';
 
+/**
+ * An activity the user tracks: built-in (sleep, work…) or one they added
+ * ("Guitar"). Custom activities have no history at first, so what the user
+ * says about them (when they'd like to do it, how long a session is) stands in
+ * for history until there is some, and is blended with it afterwards.
+ */
 export interface Category {
   id: string;
   name: string;
   enjoyment: Enjoyment;
   flexibility: Flexibility;
   color?: string;
+  emoji?: string;
+  /** When the user would like to do this (e.g. evenings). Guides planning and review suggestions. */
+  preferredTimes?: TimeWindow[];
+  /** Typical length of one session in minutes; plans use blocks of at least this size. */
+  sessionMinutes?: number;
+  /** Kept for history, but no longer planned, offered in the review, or usable for new entries. */
+  archived?: boolean;
+}
+
+/** A daily time window; wraps past midnight when `end <= start` (22:00–01:00). */
+export interface TimeWindow {
+  start: TimeOfDay;
+  end: TimeOfDay;
 }
 
 /** Where a block came from. */
@@ -141,7 +160,10 @@ export interface CategoryStats {
   shareOfFreeTime: number;
   /** Same, per weekday (index 0 = Sunday). Weekends are spent differently from workdays. */
   shareOfFreeTimeByWeekday: number[];
-  /** Per 15-minute slot of the day (96 entries): how often this category occupied it (0–1). */
+  /**
+   * Per 15-minute slot of the day (96 entries): how often this category occupied
+   * it (0–1), raised to at least PREFERENCE_WEIGHT inside its preferred times.
+   */
   slotProfile: number[];
   /** Typical start of the day's first block in this category, minutes after midnight. */
   typicalStartMinute: number | null;

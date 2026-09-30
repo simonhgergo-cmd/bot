@@ -1,4 +1,4 @@
-import type { DateKey, LocalDateTime } from './types.ts';
+import type { DateKey, LocalDateTime, TimeOfDay, TimeWindow } from './types.ts';
 
 export const MINUTES_PER_DAY = 24 * 60;
 /** Resolution of learned time-of-day profiles and of the optimal-day grid. */
@@ -52,6 +52,31 @@ export function formatDuration(minutes: number): string {
   const h = Math.floor(abs / 60);
   const m = abs % 60;
   return `${sign}${h ? `${h}h` : ''}${m || !h ? `${m}m` : ''}`;
+}
+
+const TIME_STEP = 5;
+
+/** `HH:mm` → minutes after midnight. Times must be multiples of 5 minutes. */
+export function parseTime(t: TimeOfDay): number {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(t);
+  if (!m) throw new Error(`Invalid time of day: ${t}`);
+  const minutes = Number(m[1]) * 60 + Number(m[2]);
+  if (minutes % TIME_STEP) throw new Error(`Times must be multiples of ${TIME_STEP} minutes: ${t}`);
+  return minutes;
+}
+
+export function formatTime(minute: number): TimeOfDay {
+  const m = ((minute % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+/** Slot indexes (0..SLOTS_PER_DAY-1) covered by a time window; wraps past midnight when end <= start. */
+export function windowSlots(w: TimeWindow): number[] {
+  const s = parseTime(w.start);
+  const len = (parseTime(w.end) - s + MINUTES_PER_DAY) % MINUTES_PER_DAY || MINUTES_PER_DAY;
+  const out: number[] = [];
+  for (let m = s; m < s + len; m += SLOT_MINUTES) out.push(Math.floor((m % MINUTES_PER_DAY) / SLOT_MINUTES));
+  return out;
 }
 
 /** Overlap in minutes between [aStart, aEnd) and [bStart, bEnd). */

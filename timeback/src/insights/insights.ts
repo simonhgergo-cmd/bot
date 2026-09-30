@@ -1,5 +1,5 @@
 import type { Category, CategoryStats, DateKey, Insights, Settings, TimeBlock } from '../domain/types.ts';
-import { MINUTES_PER_DAY, SLOTS_PER_DAY, SLOT_MINUTES, dayWindow, overlap, toMinutes } from '../domain/time.ts';
+import { MINUTES_PER_DAY, SLOTS_PER_DAY, SLOT_MINUTES, dayWindow, overlap, parseTime, toMinutes, windowSlots } from '../domain/time.ts';
 import { coverage, minutesByCategory } from '../calendar/dayView.ts';
 
 /**
@@ -19,7 +19,10 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
       typicalStartMinute: null,
     };
   }
-  if (dates.length === 0) return { daysAnalyzed: 0, daysByWeekday: [0, 0, 0, 0, 0, 0, 0], coverage: 0, byCategory };
+  if (dates.length === 0) {
+    applyPreferences(byCategory, categories);
+    return { daysAnalyzed: 0, daysByWeekday: [0, 0, 0, 0, 0, 0, 0], coverage: 0, byCategory };
+  }
 
   const committed = new Set(categories.filter((c) => c.flexibility !== 'flexible').map((c) => c.id));
   const starts: Record<string, number[]> = {};
@@ -68,7 +71,27 @@ export function analyze(blocks: TimeBlock[], dates: DateKey[], categories: Categ
     s.typicalStartMinute = st?.length ? circularMeanMinute(st) : null;
   }
 
+  applyPreferences(byCategory, categories);
   return { daysAnalyzed: dates.length, daysByWeekday: weekdayCount, coverage: coverageSum / dates.length, byCategory };
+}
+
+/** How strongly a stated preferred time counts, relative to "did it here every day" (1.0). */
+export const PREFERENCE_WEIGHT = 0.5;
+
+/**
+ * Blend what the user said into what was learned. A new activity has no
+ * history, so its preferred times are the only signal for when it happens;
+ * once it's logged, real habits add to (never erase) the stated preference.
+ */
+function applyPreferences(byCategory: Record<string, CategoryStats>, categories: Category[]) {
+  for (const c of categories) {
+    const s = byCategory[c.id];
+    if (!s || !c.preferredTimes?.length) continue;
+    for (const w of c.preferredTimes) {
+      for (const i of windowSlots(w)) s.slotProfile[i] = Math.max(s.slotProfile[i]!, PREFERENCE_WEIGHT);
+    }
+    s.typicalStartMinute ??= parseTime(c.preferredTimes[0]!.start);
+  }
 }
 
 /**

@@ -24,6 +24,7 @@ Requires Node ≥ 22.18, which runs `.ts` files directly.
 | **4. Routine calendar** | Your ideal week as editable templates (*Weekdays*, *Weekend*). The optimizer writes the first version. You add, move, resize or delete blocks, see live goal checks, and can re-plan the rest around your edits. Each day's plan is its routine with your calendar events on top. | `routine/` |
 | **2. Optimal-day calendar** | Views a second calendar showing what the day could look like, with the reasoning ("Scrolling: 2h12m → 1h to meet goal…"). It unlocks after 7 well-logged days. | `insights/`, `optimizer/` |
 | **3. Goals** | Sets targets such as *sleep ≥ 8h/day*, *scrolling ≤ 1h/day*, *exercise ≥ 150 min/week*, and tracks progress and streaks. | `goals/` |
+| **5. Custom activities** | Adds their own activities ("Guitar", 45-min sessions, evenings, loves it). They're planned, offered in the review and usable in goals from day one, before any history exists. Activities can be edited, archived, merged or deleted. | `activities/` |
 
 ## Phone app design
 
@@ -48,7 +49,8 @@ tabs:
 | ↳ | **Evening review** also asks "Did you do Exercise 21:00–21:30 as planned?": Yes, or pick what you did instead. | `startReview`, `submitReview` |
 | ↳ | **Day saved**: how much of the plan you followed, and what changed. | `adherence`, `goalProgress` |
 | **Goals** | This week's hits and misses and streaks. New goals are written as a sentence: "I want to [Sleep] [at least] [8h] [every day]". | `goals`, `goalProgress`, `setGoal` |
-| **Me** | Categories (enjoyment/flexibility), settings, data export. | `saveCategory`, settings |
+| **Me › Activities** | Your activities, built-in and custom: add one (name, emoji, how you feel about it, can it move, when you'd like to do it, session length), edit, archive, merge. | `addActivity`, `updateActivity`, `setArchived`, `mergeActivities`, `deleteActivity` |
+| ↳ | Review's "Something else…" can create an activity on the spot and log to it. | `addActivity`, `submitReview` |
 
 ### Platform plan
 
@@ -77,6 +79,7 @@ src/
   insights/    insights.ts        learns the typical day from history (pure)
   optimizer/   optimizer.ts       Optimizer interface + GreedyOptimizer (pure)
   routine/     routine.ts         editable routine: place/trim blocks, plan per date (pure)
+  activities/  activities.ts      custom activities: validation, ids, time presets (pure)
   storage/     repository.ts      persistence interface
                memoryRepository.ts, jsonFileRepository.ts
   app/         timebackApp.ts     facade: the only thing a UI calls
@@ -93,10 +96,26 @@ src/
 
 ### Key modeling decisions
 
-- **Categories carry two attributes.** Each has an *enjoyment* (`loves` /
-  `neutral` / `dislikes`) and a *flexibility* (`fixed` / `essential` /
-  `flexible`). These two attributes are all the optimizer uses to decide what
-  to protect, trim, or grow.
+- **Activities (categories) carry two attributes.** Each has an *enjoyment*
+  (`loves` / `neutral` / `dislikes`) and a *flexibility* (`fixed` /
+  `essential` / `flexible`). These two decide what the optimizer protects,
+  trims, or grows. Built-in and custom activities are the same type, so
+  nothing in the engine is special-cased per activity.
+- **What the user says stands in for missing history.** A custom activity
+  can have *preferred times* ("evenings") and a *session length* (45 min).
+  Preferred times seed the learned time-of-day profile at
+  `PREFERENCE_WEIGHT` (0.5 of "did it here every day"). That places it in
+  the plan and ranks it in the review before it's ever logged. Real logs are
+  blended in on top and never erase the stated preference. Session length
+  sets the minimum block size, how freed time is handed out, and how
+  "at least" goals round up (a 30-min goal with 40-min sessions plans one
+  whole session). Activities with preferred times claim their window
+  before habit-driven free time does.
+- **Archive, don't delete.** Archived activities keep their history and
+  still count in past stats. They're no longer planned, offered in the
+  review, or usable for new entries, and their usual time becomes free time
+  in plans. Merging moves blocks, goals and routine blocks into another
+  activity. Deleting is only allowed for activities that were never used.
 - **Times are naive local strings** (`2026-09-30T23:00`). Blocks may cross
   midnight; day views clip them. Timezones belong at the device boundary.
 - **Only well-logged days train the model** (≥ 80% of the day covered by
@@ -171,6 +190,10 @@ src/
 - **Recurring events and calendar import** (Google/ICS), via `source: 'import'`.
 - **Multi-occurrence categories.** Meals are placed as a learned pattern but
   budgeted as one daily total, with no "3 meals" rule.
-- **Closing the loop.** Let the user accept or reject a suggestion, then
-  measure whether the next weeks moved toward the plan.
+- **Measuring suggestions over time.** Decisions and daily adherence are
+  stored. Nothing yet reports whether the weeks after "Try it" actually moved
+  toward the plan.
+- **Session frequency.** "Guitar 3× a week" is expressed as minutes per week
+  and spread evenly over days (e.g. 30 min daily), not as three sessions on
+  chosen days.
 - **Timezones and DST** are not handled (see above).

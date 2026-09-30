@@ -33,6 +33,10 @@ export class MemoryRepository implements Repository {
     upsert(this.data.categories, category, (c) => c.id);
     await this.changed();
   }
+  async deleteCategory(id: string) {
+    this.data.categories = this.data.categories.filter((c) => c.id !== id);
+    await this.changed();
+  }
 
   async listBlocks(from: LocalDateTime, to: LocalDateTime) {
     // Fixed-width ISO strings compare correctly as strings.

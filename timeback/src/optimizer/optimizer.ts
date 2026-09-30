@@ -53,7 +53,9 @@ type Driver = 'goal' | 'reduce' | 'reclaim' | 'squeeze';
  *     category as close as possible to when the user usually does it.
  */
 export class GreedyOptimizer implements Optimizer {
-  plan(input: OptimizerInput): OptimalDay {
+  plan(rawInput: OptimizerInput): OptimalDay {
+    // Archived activities keep their history but are never planned; their usual time becomes free.
+    const input = { ...rawInput, categories: rawInput.categories.filter((c) => !c.archived) };
     const { budgets, drivers, goalFor, baseline } = this.budget(input);
     const blocks = this.place(input, budgets);
     const suggestions = this.explain(input, baseline, budgets, drivers, goalFor);
@@ -93,8 +95,10 @@ export class GreedyOptimizer implements Optimizer {
       let min = locked;
       const catGoals = goals.filter((g) => g.active && g.categoryId === c.id);
       for (const g of catGoals) {
-        // Round toward the goal so grid rounding can't break it (150 min/week → 30, not 15, a day).
-        const t = g.comparison === 'atLeast' ? Math.ceil(dailyTarget(g) / SLOT) * SLOT : Math.floor(dailyTarget(g) / SLOT) * SLOT;
+        // Round toward the goal so grid rounding can't break it (150 min/week → 30, not 15, a day),
+        // and "at least" goals up to whole sessions (a 45-min guitar session, not 30 min of one).
+        const unit = g.comparison === 'atLeast' ? chunkMinutes(c) : SLOT;
+        const t = g.comparison === 'atLeast' ? Math.ceil(dailyTarget(g) / unit) * unit : Math.floor(dailyTarget(g) / SLOT) * SLOT;
         if (g.comparison === 'atLeast' && t > target) {
           target = t;
           drivers[c.id] = 'goal';
@@ -122,17 +126,23 @@ export class GreedyOptimizer implements Optimizer {
       // Freed time goes to what the user loves, weighted by how much they already
       // do it, handed out in whole chunks so nobody gets a useless 15-minute crumb.
       const loved = categories.filter((c) => c.enjoyment === 'loves' && c.flexibility !== 'fixed' && !keep.has(c.id));
-      const weight = (c: Category) => Math.max(baseline[c.id] ?? 0, SLOT);
+      // A new activity has no history; its stated session length stands in for it.
+      const weight = (c: Category) => Math.max(baseline[c.id] ?? 0, c.sessionMinutes ?? 0, SLOT);
       const extra: Record<string, number> = {};
       let remaining = Math.floor(leftover / SLOT) * SLOT;
       while (loved.length && remaining > 0) {
-        // D'Hondt: next chunk to whoever has the most weight per chunk already received.
-        // A final sub-chunk remainder tops up an activity that already got time.
-        const byQuota = [...loved].sort((a, b) => weight(b) / ((extra[b.id] ?? 0) + MIN_CHUNK) - weight(a) / ((extra[a.id] ?? 0) + MIN_CHUNK));
-        const chunk = remaining >= MIN_CHUNK ? MIN_CHUNK : remaining;
-        const next = chunk < MIN_CHUNK ? ([...loved].sort((a, b) => (extra[b.id] ?? 0) - (extra[a.id] ?? 0))[0]!) : byQuota[0]!;
-        extra[next.id] = (extra[next.id] ?? 0) + chunk;
-        remaining -= chunk;
+        // D'Hondt: next chunk (one session) to whoever has the most weight per minute already received.
+        const fitting = loved.filter((c) => chunkMinutes(c) <= remaining);
+        if (fitting.length === 0) {
+          // A remainder smaller than any session tops up whoever already got the most.
+          const top = [...loved].sort((a, b) => (extra[b.id] ?? 0) - (extra[a.id] ?? 0))[0]!;
+          extra[top.id] = (extra[top.id] ?? 0) + remaining;
+          break;
+        }
+        const quota = (c: Category) => weight(c) / ((extra[c.id] ?? 0) + chunkMinutes(c));
+        const next = fitting.sort((a, b) => quota(b) - quota(a))[0]!;
+        extra[next.id] = (extra[next.id] ?? 0) + chunkMinutes(next);
+        remaining -= chunkMinutes(next);
       }
       for (const c of loved) {
         if (!extra[c.id]) continue;
@@ -184,9 +194,14 @@ export class GreedyOptimizer implements Optimizer {
       }
     }
 
-    // Placement order = priority for the best time slots.
+    // Placement order = priority for the best time slots. Free-time activities
+    // with a stated preferred time (explicit intent) go before ones placed by habit alone.
     const rank = (c: Category) =>
-      c.flexibility === 'fixed' ? 0 : c.flexibility === 'essential' ? 1 : c.enjoyment === 'loves' ? 3 : 2;
+      c.flexibility === 'fixed' ? 0
+      : c.flexibility === 'essential' ? 1
+      : c.preferredTimes?.length ? 1.5
+      : c.enjoyment === 'loves' ? 3
+      : 2;
     const ordered = [...categories].sort((a, b) => rank(a) - rank(b));
 
     const needs: Record<string, number> = {};
@@ -205,7 +220,7 @@ export class GreedyOptimizer implements Optimizer {
       const anchor = Math.round((stats?.typicalStartMinute ?? DEFAULT_ANCHOR_MINUTE) / SLOT) % SLOTS;
       if ((needs[c.id] ?? 0) <= 0) continue;
       // One chunk per time of day the user usually does this (meals: breakfast + dinner).
-      const queue = splitIntoChunks(needs[c.id]!, episodes(profile), anchor);
+      const queue = splitIntoChunks(needs[c.id]!, episodes(profile), anchor, chunkMinutes(c) / SLOT);
       while (queue.length) {
         const { size, center } = queue.shift()!;
         const placed = placeChunk(grid, c.id, size, center, profile);
@@ -308,18 +323,23 @@ function episodes(profile: number[]): Episode[] {
   return out;
 }
 
-/** Split `need` slots across episodes by weight, dropping any share below the minimum chunk. */
-function splitIntoChunks(need: number, eps: Episode[], anchor: number): Array<{ size: number; center: number }> {
+/** Minutes of one planned block for this activity: its session length, and never below MIN_CHUNK. */
+function chunkMinutes(c: Category): number {
+  return Math.max(MIN_CHUNK, Math.round((c.sessionMinutes ?? 0) / SLOT) * SLOT);
+}
+
+/** Split `need` slots across episodes by weight, dropping any share below `minSize` slots (one session). */
+function splitIntoChunks(need: number, eps: Episode[], anchor: number, minSize = MIN_CHUNK_SLOTS): Array<{ size: number; center: number }> {
   const center = (e: Episode) => (e.start + Math.floor(e.len / 2)) % SLOTS;
   let chosen = [...eps].sort((a, b) => b.weight - a.weight);
-  if (chosen.length === 0 || need < 2 * MIN_CHUNK_SLOTS) {
+  if (chosen.length === 0 || need < 2 * minSize) {
     return [{ size: need, center: chosen[0] ? center(chosen[0]) : anchor }];
   }
   for (;;) {
     const total = sum(chosen.map((e) => e.weight));
     const sizes = chosen.map((e) => Math.round((need * e.weight) / total));
     const smallest = sizes.indexOf(Math.min(...sizes));
-    if (sizes[smallest]! >= MIN_CHUNK_SLOTS || chosen.length === 1) {
+    if (sizes[smallest]! >= minSize || chosen.length === 1) {
       sizes[0]! += need - sum(sizes); // rounding remainder goes to the main episode
       return chosen.map((e, i) => ({ size: sizes[i]!, center: center(e) })).filter((x) => x.size > 0);
     }
@@ -408,7 +428,8 @@ function fillSmallHoles(grid: Array<string | null>, candidates: Category[], need
       return f;
     };
     const pick = candidates
-      .filter((c) => (needs[c.id] ?? 0) >= run.len)
+      // Must still need this much, and a hole must not cut one of its sessions short.
+      .filter((c) => (needs[c.id] ?? 0) >= run.len && chunkMinutes(c) / SLOT <= run.len)
       .sort((a, b) => fit(b) - fit(a) || needs[b.id]! - needs[a.id]!)[0];
     if (!pick) continue;
     for (let k = 0; k < run.len; k++) grid[(run.start + k) % SLOTS] = pick.id;
