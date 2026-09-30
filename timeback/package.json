@@ -1,0 +1,17 @@
+{
+  "name": "timeback",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Calendar that learns how you actually spend your day and proposes an optimal day that wins back time for what you enjoy.",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "demo": "node scripts/demo.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}
