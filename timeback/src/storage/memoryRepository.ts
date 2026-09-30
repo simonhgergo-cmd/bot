@@ -1,4 +1,4 @@
-import type { Category, DateKey, DayReview, Goal, LocalDateTime, Routine, Settings, TimeBlock } from '../domain/types.ts';
+import type { Category, DateKey, DayReview, Goal, LocalDateTime, Routine, Settings, SuggestionRecord, TimeBlock } from '../domain/types.ts';
 import { DEFAULT_SETTINGS } from '../domain/types.ts';
 import type { Repository } from './repository.ts';
 
@@ -8,11 +8,12 @@ export interface Snapshot {
   goals: Goal[];
   reviews: DayReview[];
   routines: Routine[];
+  decisions: SuggestionRecord[];
   settings: Settings;
 }
 
 export function emptySnapshot(): Snapshot {
-  return { categories: [], blocks: [], goals: [], reviews: [], routines: [], settings: { ...DEFAULT_SETTINGS } };
+  return { categories: [], blocks: [], goals: [], reviews: [], routines: [], decisions: [], settings: { ...DEFAULT_SETTINGS } };
 }
 
 export class MemoryRepository implements Repository {
@@ -74,6 +75,18 @@ export class MemoryRepository implements Repository {
   }
   async deleteRoutine(id: string) {
     this.data.routines = this.data.routines.filter((r) => r.id !== id);
+    await this.changed();
+  }
+
+  async listSuggestionDecisions() {
+    return structuredClone(this.data.decisions);
+  }
+  async saveSuggestionDecision(record: SuggestionRecord) {
+    upsert(this.data.decisions, record, (r) => r.key);
+    await this.changed();
+  }
+  async deleteSuggestionDecision(key: string) {
+    this.data.decisions = this.data.decisions.filter((r) => r.key !== key);
     await this.changed();
   }
 

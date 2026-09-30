@@ -30,6 +30,7 @@ Requires Node ≥ 22.18, which runs `.ts` files directly.
 ![Today, evening review, optimal day](design/mobile-1.png)
 ![Suggestions, goals, new goal](design/mobile-2.png)
 ![Routine, edit a block, live check](design/mobile-3.png)
+![Plan on the calendar, did you do it, how the day went](design/mobile-4.png)
 
 Mockups are drawn from real engine output on the demo data. There are four
 tabs:
@@ -42,7 +43,10 @@ tabs:
 | **Plan › Routine** | The editable routine: switch between Weekdays and Weekend, see goal checks at the top, and tap `+` or a block to edit. | `routines`, `generateRoutines`, `checkRoutine` |
 | ↳ | **Edit block** sheet: activity, start/end in 5-minute steps, what the block takes time from, and a goal warning before saving. | `placeRoutineBlock`, `removeRoutineBlock` |
 | ↳ | **Live check**: if an edit breaks a goal, offer "Re-plan around my edits". Edited blocks (✎) stay put. | `checkRoutine`, `generateRoutines` |
-| ↳ | **Why this plan**: each suggestion with *Try it* / *Not for me*, plus "Put this plan on tomorrow". | `optimalDay().suggestions` |
+| ↳ | **Why this plan**: each suggestion with *Try it* / *Not for me* (and Undo), plus "Put this plan on tomorrow". | `decideSuggestion`, `clearSuggestionDecision`, `applyPlan` |
+| **Today** (after applying) | Planned blocks appear dashed next to your own events. A banner says what your events pushed out ("Dinner with Sam replaces 1h15m of TV"). | `day`, `applyPlan().displaced` |
+| ↳ | **Evening review** also asks "Did you do Exercise 21:00–21:30 as planned?": Yes, or pick what you did instead. | `startReview`, `submitReview` |
+| ↳ | **Day saved**: how much of the plan you followed, and what changed. | `adherence`, `goalProgress` |
 | **Goals** | This week's hits and misses and streaks. New goals are written as a sentence: "I want to [Sleep] [at least] [8h] [every day]". | `goals`, `goalProgress`, `setGoal` |
 | **Me** | Categories (enjoyment/flexibility), settings, data export. | `saveCategory`, settings |
 
@@ -58,9 +62,9 @@ tabs:
   21:30, configurable) when `pendingReviews()` or today's gaps are non-empty.
 - **Calendar import.** Read the device calendar (expo-calendar) into blocks
   with `source: 'import'`, so meetings don't have to be typed in twice.
-- **Needed from the engine next:** accept/reject state for suggestions ("Try
-  it" / "Not for me"), and letting a routine block be marked as locked
-  (can't be re-planned) without editing it.
+- **Needed from the engine next:** a "Move" action for displaced time (re-fit
+  it elsewhere in the day), and letting a routine block be locked without
+  editing it.
 
 ## Architecture
 
@@ -121,15 +125,42 @@ src/
 - **`adherence(date)`** is the share of logged minutes that matched the plan.
   It's the basis for measuring whether the routine is working.
 
+### Plans on the calendar, and closing the loop
+
+- **Planned is not logged.** `applyPlan(date)` writes the routine's plan (or
+  the optimal day) into the calendar as blocks with `status: 'planned'`.
+  These are shown, but learning, goals, gap detection and comparisons ignore
+  them. Otherwise the app would learn from its own suggestions as if you had
+  followed them.
+- **The review confirms them.** For each planned block that has ended, the
+  evening review asks "did you do this as planned?". Confirming removes the
+  `planned` status. Answering with what you actually did replaces the block.
+  Unconfirmed plans keep the day in `pendingReviews`.
+- **Your events win.** Planned blocks are cut around anything already on
+  the calendar and never overwrite it. `displaced` reports what was pushed
+  out, so the UI can offer to move it. Re-applying replaces the previous
+  plan, and `from` plans only the rest of the day.
+- **Suggestion decisions are remembered.** "Not for me" keeps that activity
+  at your usual level in future optimal days and routine regeneration, and
+  it is squeezed only as a last resort. For a goal suggestion, the goal is
+  still tracked but not planned for. "Try it" is recorded and shown as
+  *Trying it*. Both can be undone.
+
 ### How the optimal day is built
 
 1. **Budget:** start from the baseline. Enforce goals, cut disliked flexible
    activities by up to `maxReductionShare`, and give the freed time to loved
    activities. If the plan is over-committed, shrink in this order: disliked,
    then neutral, then loved, then essential. Goal minimums are never cut.
-2. **Place:** fill a 15-minute grid around fixed commitments. Each slot
-   prefers the category the user historically does at that time, then
-   extends existing chunks, then sits near the usual start time.
+2. **Place:** lay out contiguous chunks on a 15-minute grid around fixed
+   commitments. Each activity gets one chunk per time of day it's usually
+   done, learned from history (meals: breakfast + dinner; sleep: once), and
+   each chunk is at least 30 minutes. A chunk goes in the free window that
+   best matches the usual timing, stays close to it, and sits flush
+   against other blocks. Small leftover holes go wholly to the free-time
+   activity that fits them best. Finally, neighbouring free-time blocks are
+   reordered when that joins pieces of the same activity. Freed time is
+   handed out in 30-minute units.
 3. **Explain:** each change becomes a `Suggestion` (`meetGoal` / `reduce` /
    `reclaim`) with a human-readable message. `reclaimedMinutes` is the extra
    time given to loved activities.
@@ -137,9 +168,6 @@ src/
 ## Known limitations / next steps
 
 - **Phone UI.** Designed (see above), not built yet.
-- **Fragmented placement.** Short activities can be split into 15-minute
-  pieces (chores in the mockup). Placement should prefer one contiguous
-  block per activity.
 - **Recurring events and calendar import** (Google/ICS), via `source: 'import'`.
 - **Multi-occurrence categories.** Meals are placed as a learned pattern but
   budgeted as one daily total, with no "3 meals" rule.

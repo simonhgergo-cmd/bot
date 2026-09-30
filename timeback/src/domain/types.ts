@@ -33,7 +33,8 @@ export interface Category {
 export type BlockSource =
   | 'user' // entered in the main calendar like any normal calendar event
   | 'review' // filled in via the end-of-day question form
-  | 'import'; // external calendar sync (future)
+  | 'import' // external calendar sync (future)
+  | 'plan'; // written when the user puts a plan on their calendar
 
 /** One entry in the user's real ("actual") calendar. */
 export interface TimeBlock {
@@ -45,6 +46,12 @@ export interface TimeBlock {
   source: BlockSource;
   /** User says this can't be moved (overrides category flexibility for this block). */
   locked?: boolean;
+  /**
+   * `planned`: on the calendar as intent, not yet confirmed as having happened.
+   * Planned blocks are shown, but ignored by learning, goals and gap detection
+   * until the evening review confirms them (then the status is removed).
+   */
+  status?: 'planned';
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +71,8 @@ export interface ReviewQuestion {
   prompt: string;
   /** Category ids ranked by how likely they are, based on history at this time of day. */
   suggestedCategoryIds: string[];
+  /** Set when asking "did you do this as planned?" about a planned block. */
+  plannedBlockId?: string;
 }
 
 export interface ReviewAnswerPart {
@@ -73,10 +82,14 @@ export interface ReviewAnswerPart {
   title?: string;
 }
 
-/** A gap can be answered with one or more parts ("gym, then lunch"). */
+/**
+ * A gap can be answered with one or more parts ("gym, then lunch"). A planned
+ * block can be confirmed as-is (`confirmed: true`) or replaced with parts.
+ */
 export interface ReviewAnswer {
   questionId: string;
-  parts: ReviewAnswerPart[];
+  parts?: ReviewAnswerPart[];
+  confirmed?: boolean;
 }
 
 export interface DayReview {
@@ -149,11 +162,31 @@ export type SuggestionKind =
   | 'reclaim'; // hand freed-up time to something the user loves
 
 export interface Suggestion {
+  /** Stable across days (`kind:categoryId`), used to remember the user's decision. */
+  key: string;
   kind: SuggestionKind;
   categoryId: string;
   /** Positive = more time, negative = less time, versus the user's typical day. */
   deltaMinutes: number;
   message: string;
+  /** The user's earlier answer to this suggestion, if any. */
+  decision?: SuggestionDecision;
+}
+
+export type SuggestionDecision = 'accepted' | 'rejected';
+
+/**
+ * "Try it" / "Not for me". A rejected suggestion keeps that activity at the
+ * user's usual level in future plans and routines until the decision is undone.
+ */
+export interface SuggestionRecord {
+  key: string;
+  categoryId: string;
+  kind: SuggestionKind;
+  decision: SuggestionDecision;
+  /** The change that was proposed when the user decided. */
+  deltaMinutes: number;
+  decidedAt: LocalDateTime;
 }
 
 /** The "other" calendar: what the app thinks the day could look like. */

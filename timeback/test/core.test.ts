@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { findGaps, coverage, minutesByCategory } from '../src/calendar/dayView.ts';
-import { answersToBlocks, buildReview } from '../src/review/endOfDayReview.ts';
+import { reviewChanges, buildReview } from '../src/review/endOfDayReview.ts';
 import { currentStreak, evaluateGoal } from '../src/goals/goals.ts';
 import { circularMeanMinute } from '../src/insights/insights.ts';
 import { addDays, weekStart } from '../src/domain/time.ts';
@@ -40,17 +40,17 @@ test('review answers must stay inside their gap and use known categories', () =>
   const ids = () => `b${++n}`;
   const known = new Set(['gym', 'meals']);
 
-  const blocks = answersToBlocks(review, [{ questionId: q.id, parts: [
+  const { save: blocks } = reviewChanges(review, [{ questionId: q.id, parts: [
     { start: '2026-09-30T13:00', end: '2026-09-30T14:00', categoryId: 'gym' },
     { start: '2026-09-30T14:00', end: '2026-09-30T15:00', categoryId: 'meals' },
   ] }], known, ids);
   assert.equal(blocks.length, 2);
   assert.ok(blocks.every((b) => b.source === 'review'));
 
-  assert.throws(() => answersToBlocks(review, [{ questionId: q.id, parts: [
+  assert.throws(() => reviewChanges(review, [{ questionId: q.id, parts: [
     { start: '2026-09-30T12:00', end: '2026-09-30T14:00', categoryId: 'gym' },
   ] }], known, ids), /outside gap/);
-  assert.throws(() => answersToBlocks(review, [{ questionId: q.id, parts: [
+  assert.throws(() => reviewChanges(review, [{ questionId: q.id, parts: [
     { start: '2026-09-30T13:00', end: '2026-09-30T14:00', categoryId: 'nope' },
   ] }], known, ids), /Unknown category/);
 });

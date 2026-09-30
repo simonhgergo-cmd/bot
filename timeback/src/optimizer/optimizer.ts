@@ -20,6 +20,11 @@ export interface OptimizerInput {
   /** Blocks already on the calendar for `date` that must not move (locked, or in a `fixed` category). */
   fixedBlocks: TimeBlock[];
   settings: Settings;
+  /**
+   * Categories the user said "Not for me" to: planned at their usual level,
+   * with no goal, reduce or reclaim changes (still at least any locked time).
+   */
+  keepAsUsual?: string[];
 }
 
 /**
@@ -73,13 +78,14 @@ export class GreedyOptimizer implements Optimizer {
     const goalFor: Record<string, Goal> = {};
     const floor: Record<string, number> = {}; // never squeeze below this
 
+    const keep = new Set(input.keepAsUsual ?? []);
     for (const c of categories) {
       const base = baseline[c.id] ?? 0;
       const locked = lockedMinutes[c.id] ?? 0;
 
-      if (c.flexibility === 'fixed') {
-        budgets[c.id] = base;
-        floor[c.id] = base;
+      if (c.flexibility === 'fixed' || keep.has(c.id)) {
+        budgets[c.id] = Math.max(base, locked);
+        floor[c.id] = budgets[c.id]!;
         continue;
       }
 
@@ -115,7 +121,7 @@ export class GreedyOptimizer implements Optimizer {
     if (leftover > 0) {
       // Freed time goes to what the user loves, weighted by how much they already
       // do it, handed out in whole chunks so nobody gets a useless 15-minute crumb.
-      const loved = categories.filter((c) => c.enjoyment === 'loves' && c.flexibility !== 'fixed');
+      const loved = categories.filter((c) => c.enjoyment === 'loves' && c.flexibility !== 'fixed' && !keep.has(c.id));
       const weight = (c: Category) => Math.max(baseline[c.id] ?? 0, SLOT);
       const extra: Record<string, number> = {};
       let remaining = Math.floor(leftover / SLOT) * SLOT;
@@ -136,11 +142,12 @@ export class GreedyOptimizer implements Optimizer {
       if (loved.length) leftover = 0;
     } else if (leftover < 0) {
       // Over-committed (e.g. ambitious goals): shrink the least valuable time first.
+      // Activities the user asked to keep as usual are only touched as a last resort.
       const tiers: Array<(c: Category) => boolean> = [
-        (c) => c.flexibility === 'flexible' && c.enjoyment === 'dislikes',
-        (c) => c.flexibility === 'flexible' && c.enjoyment === 'neutral',
-        (c) => c.flexibility === 'flexible' && c.enjoyment === 'loves',
-        (c) => c.flexibility === 'essential',
+        (c) => !keep.has(c.id) && c.flexibility === 'flexible' && c.enjoyment === 'dislikes',
+        (c) => !keep.has(c.id) && c.flexibility === 'flexible' && c.enjoyment === 'neutral',
+        (c) => !keep.has(c.id) && c.flexibility === 'flexible' && c.enjoyment === 'loves',
+        (c) => !keep.has(c.id) && c.flexibility === 'essential',
       ];
       for (const inTier of tiers) {
         if (leftover >= 0) break;
@@ -261,11 +268,11 @@ export class GreedyOptimizer implements Optimizer {
       if (Math.abs(delta) < SLOT) continue;
       const change = `${formatDuration(base)} → ${formatDuration(budgets[c.id]!)} a day`;
       if (driver === 'goal') {
-        out.push({ kind: 'meetGoal', categoryId: c.id, deltaMinutes: delta, message: `${c.name}: ${change} to meet "${goalFor[c.id]!.label}".` });
+        out.push({ key: `meetGoal:${c.id}`, kind: 'meetGoal', categoryId: c.id, deltaMinutes: delta, message: `${c.name}: ${change} to meet "${goalFor[c.id]!.label}".` });
       } else if (driver === 'reclaim' && delta > 0) {
-        out.push({ kind: 'reclaim', categoryId: c.id, deltaMinutes: delta, message: `${c.name}: ${change}. This is the time you win back.` });
+        out.push({ key: `reclaim:${c.id}`, kind: 'reclaim', categoryId: c.id, deltaMinutes: delta, message: `${c.name}: ${change}. This is the time you win back.` });
       } else if (delta < 0) {
-        out.push({ kind: 'reduce', categoryId: c.id, deltaMinutes: delta, message: `${c.name}: ${change}.` });
+        out.push({ key: `reduce:${c.id}`, kind: 'reduce', categoryId: c.id, deltaMinutes: delta, message: `${c.name}: ${change}.` });
       }
     }
     return out.sort((a, b) => Math.abs(b.deltaMinutes) - Math.abs(a.deltaMinutes));

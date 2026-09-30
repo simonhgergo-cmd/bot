@@ -11,11 +11,14 @@ import type {
   Routine,
   RoutineBlock,
   RoutineCheck,
+  Suggestion,
+  SuggestionDecision,
+  SuggestionRecord,
   TimeBlock,
 } from '../domain/types.ts';
 import { addDays, dateRange, dayWindow, fromMinutes, toMinutes } from '../domain/time.ts';
 import { findGaps, minutesByCategory } from '../calendar/dayView.ts';
-import { answersToBlocks, buildReview } from '../review/endOfDayReview.ts';
+import { buildReview, reviewChanges, type ReviewChanges } from '../review/endOfDayReview.ts';
 import { currentStreak, evaluateGoal, periodBounds } from '../goals/goals.ts';
 import { analyze, wellLoggedDays } from '../insights/insights.ts';
 import { GreedyOptimizer, typicalDay, type Optimizer } from '../optimizer/optimizer.ts';
@@ -27,6 +30,16 @@ export interface AppOptions {
   historyDays?: number;
   optimizer?: Optimizer;
   newId?: () => string;
+}
+
+export interface ApplyPlanResult {
+  /** Planned blocks written to the calendar. */
+  blocks: TimeBlock[];
+  /**
+   * Planned time that the user's own events pushed out, per activity (e.g.
+   * "Dinner with Sam" replaces 30 min of exercise), so the UI can say so.
+   */
+  displaced: Array<{ categoryId: string; minutes: number }>;
 }
 
 export interface DayComparison {
@@ -77,15 +90,22 @@ export class TimebackApp {
     await this.repo.deleteBlock(id);
   }
 
+  /** Everything on the calendar for `date`, including planned blocks not yet confirmed. */
   async day(date: DateKey): Promise<TimeBlock[]> {
     const [s, e] = dayWindow(date);
     return this.repo.listBlocks(fromMinutes(s), fromMinutes(e));
   }
 
+  /** Only what actually happened (or the user put there themselves); excludes unconfirmed plan blocks. */
+  async loggedDay(date: DateKey): Promise<TimeBlock[]> {
+    return (await this.day(date)).filter(isLogged);
+  }
+
   // -- End-of-day question form -----------------------------------------------
 
   /**
-   * Build (or rebuild) the question form for `date` from its current gaps.
+   * Build (or rebuild) the question form for `date`: one question per unlogged
+   * gap, and "did you do this as planned?" for each planned block that has ended.
    * `now` limits questions to time that has already passed.
    */
   async startReview(date: DateKey, now?: LocalDateTime): Promise<DayReview> {
@@ -95,30 +115,42 @@ export class TimebackApp {
       this.repo.listCategories(),
       this.insights(date),
     ]);
-    const gaps = findGaps(blocks, date, settings.minGapMinutes, now ? toMinutes(now) : undefined);
-    const review = buildReview(date, gaps, categories, insights);
+    const until = now ? toMinutes(now) : undefined;
+    // Planned time isn't a gap: it gets its own confirm question instead.
+    const gaps = findGaps(blocks, date, settings.minGapMinutes, until);
+    const ended = blocks.filter((b) => !isLogged(b) && (until === undefined || toMinutes(b.end) <= until));
+    const review = buildReview(date, gaps, categories, insights, ended);
     await this.repo.saveReview(review);
     return review;
   }
 
-  async submitReview(date: DateKey, answers: ReviewAnswer[], completedAt: LocalDateTime): Promise<TimeBlock[]> {
+  async submitReview(date: DateKey, answers: ReviewAnswer[], completedAt: LocalDateTime): Promise<ReviewChanges> {
     const review = await this.repo.getReview(date);
     if (!review) throw new Error(`No review started for ${date}`);
     const known = new Set((await this.repo.listCategories()).map((c) => c.id));
-    const blocks = answersToBlocks(review, answers, known, this.newId);
-    for (const b of blocks) await this.repo.saveBlock(b);
+    const changes = reviewChanges(review, answers, known, this.newId);
+    const current = new Map((await this.day(date)).map((b) => [b.id, b]));
+    for (const id of changes.remove) await this.repo.deleteBlock(id);
+    for (const id of changes.confirm) {
+      const b = current.get(id);
+      if (!b) throw new Error(`Planned block ${id} no longer exists`);
+      const { status: _planned, ...happened } = b;
+      await this.repo.saveBlock(happened);
+    }
+    for (const b of changes.save) await this.repo.saveBlock(b);
     await this.repo.saveReview({ ...review, completedAt });
-    return blocks;
+    return changes;
   }
 
-  /** Past days (within history) that still have unanswered gaps — drives the reminder notification. */
+  /** Past days (within a week) with unanswered gaps or unconfirmed plans — drives the reminder notification. */
   async pendingReviews(today: DateKey): Promise<DateKey[]> {
     const settings = await this.repo.getSettings();
     const out: DateKey[] = [];
     for (const d of dateRange(addDays(today, -7), addDays(today, -1))) {
       const review = await this.repo.getReview(d);
       if (review?.completedAt) continue;
-      if (findGaps(await this.day(d), d, settings.minGapMinutes).length) out.push(d);
+      const blocks = await this.day(d);
+      if (blocks.some((b) => !isLogged(b)) || findGaps(blocks, d, settings.minGapMinutes).length) out.push(d);
     }
     return out;
   }
@@ -142,7 +174,7 @@ export class TimebackApp {
     // Weekly goals may need blocks outside [from, to]; widen to whole weeks.
     const start = goals.reduce((d, g) => (periodBounds(g, from)[0] < d ? periodBounds(g, from)[0] : d), from);
     const end = goals.reduce((d, g) => (periodBounds(g, to)[1] > d ? periodBounds(g, to)[1] : d), to);
-    const blocks = await this.repo.listBlocks(`${start}T00:00`, `${addDays(end, 1)}T00:00`);
+    const blocks = (await this.repo.listBlocks(`${start}T00:00`, `${addDays(end, 1)}T00:00`)).filter(isLogged);
     return goals.map((goal) => {
       const progress = evaluateGoal(goal, blocks, from, to);
       return { goal, progress, streak: currentStreak(progress) };
@@ -163,19 +195,117 @@ export class TimebackApp {
     return { ready: dates.length >= settings.minDaysForSuggestions, goodDays: dates.length, needed: settings.minDaysForSuggestions };
   }
 
-  /** The "other" calendar. Returns null until there is enough history to say anything useful. */
+  /**
+   * The "other" calendar. Returns null until there is enough history to say
+   * anything useful. Suggestions carry the user's earlier decision, and
+   * activities they rejected are kept at their usual level.
+   */
   async optimalDay(date: DateKey): Promise<OptimalDay | null> {
     if (!(await this.readiness(date)).ready) return null;
-    const [categories, goals, settings, insights, dayBlocks] = await Promise.all([
+    const [categories, goals, settings, insights, dayBlocks, decisions] = await Promise.all([
       this.repo.listCategories(),
       this.repo.listGoals(),
       this.repo.getSettings(),
       this.insights(date),
-      this.day(date),
+      this.loggedDay(date),
+      this.repo.listSuggestionDecisions(),
     ]);
     const fixedCats = new Set(categories.filter((c) => c.flexibility === 'fixed').map((c) => c.id));
     const fixedBlocks = dayBlocks.filter((b) => b.locked || fixedCats.has(b.categoryId));
-    return this.optimizer.plan({ date, categories, goals: goals.filter((g) => g.active), insights, fixedBlocks, settings });
+    const plan = this.optimizer.plan({
+      date, categories, goals: goals.filter((g) => g.active), insights, fixedBlocks, settings,
+      keepAsUsual: rejectedCategories(decisions),
+    });
+    const byKey = new Map(decisions.map((d) => [d.key, d.decision]));
+    return { ...plan, suggestions: plan.suggestions.map((s) => (byKey.has(s.key) ? { ...s, decision: byKey.get(s.key)! } : s)) };
+  }
+
+  // -- Suggestion decisions ("Try it" / "Not for me") --------------------------
+
+  /**
+   * Remember the user's answer to a suggestion. "Not for me" keeps that
+   * activity at its usual level in future optimal days and routine
+   * regeneration; call `generateRoutines` to apply it to existing routines.
+   */
+  async decideSuggestion(suggestion: Suggestion, decision: SuggestionDecision, now: LocalDateTime): Promise<SuggestionRecord> {
+    const record: SuggestionRecord = {
+      key: suggestion.key,
+      categoryId: suggestion.categoryId,
+      kind: suggestion.kind,
+      decision,
+      deltaMinutes: suggestion.deltaMinutes,
+      decidedAt: now,
+    };
+    await this.repo.saveSuggestionDecision(record);
+    return record;
+  }
+
+  /** Undo a decision: the suggestion can be proposed again. */
+  async clearSuggestionDecision(key: string): Promise<void> {
+    await this.repo.deleteSuggestionDecision(key);
+  }
+
+  suggestionDecisions(): Promise<SuggestionRecord[]> {
+    return this.repo.listSuggestionDecisions();
+  }
+
+  // -- "Put this plan on my calendar" -----------------------------------------
+
+  /**
+   * Write the plan for `date` into the main calendar as planned blocks: the
+   * routine's plan if one covers the date, else the optimal day. Planned blocks
+   * never overwrite anything already on the calendar, and re-applying replaces
+   * the previous ones. With `from`, only the rest of the day is planned.
+   * The evening review later asks whether each one happened.
+   */
+  async applyPlan(date: DateKey, opts: { from?: LocalDateTime } = {}): Promise<ApplyPlanResult> {
+    const existing = await this.day(date);
+    const existingIds = new Set(existing.map((b) => b.id));
+    const fromRoutine = await this.planForDate(date);
+    let proposed: Array<Pick<TimeBlock, 'start' | 'end' | 'categoryId' | 'title'>>;
+    if (fromRoutine) proposed = fromRoutine.filter((b) => !existingIds.has(b.id));
+    else {
+      const optimal = await this.optimalDay(date);
+      if (!optimal) throw new Error(`Not enough history to plan ${date} yet`);
+      proposed = optimal.blocks.filter((b) => b.origin === 'planned');
+    }
+
+    // Replace earlier applied plans for this date.
+    const previous = existing.filter((b) => b.source === 'plan' && !isLogged(b));
+    for (const b of previous) await this.repo.deleteBlock(b.id);
+    const keep = existing.filter((b) => !previous.includes(b));
+
+    const events = keep.map((b) => [toMinutes(b.start), toMinutes(b.end)] as [number, number]);
+    const past: Array<[number, number]> = opts.from ? [[dayWindow(date)[0], toMinutes(opts.from)]] : [];
+    const saved: TimeBlock[] = [];
+    const displaced: Record<string, number> = {};
+    for (const p of proposed) {
+      const span: [number, number] = [toMinutes(p.start), toMinutes(p.end)];
+      const future = cutAround(span, past);
+      const fits = future.flatMap((piece) => cutAround(piece, events));
+      const lost = sumSpans(future) - sumSpans(fits);
+      if (lost > 0) displaced[p.categoryId] = (displaced[p.categoryId] ?? 0) + lost;
+      for (const [s, e] of fits) {
+        if (e - s < 15) continue; // don't create slivers around existing events
+        const block: TimeBlock = {
+          id: this.newId(),
+          start: fromMinutes(s),
+          end: fromMinutes(e),
+          categoryId: p.categoryId,
+          ...(p.title ? { title: p.title } : {}),
+          source: 'plan',
+          status: 'planned',
+        };
+        await this.repo.saveBlock(block);
+        saved.push(block);
+      }
+    }
+    return {
+      blocks: saved,
+      displaced: Object.entries(displaced)
+        .map(([categoryId, minutes]) => ({ categoryId, minutes }))
+        .sort((a, b) => b.minutes - a.minutes),
+    };
   }
 
   /** Side-by-side minutes per category: what happened vs. what the optimal day proposed. */
@@ -185,7 +315,7 @@ export class TimebackApp {
     const optimalBlocks: TimeBlock[] = optimal.blocks.map((b, i) => ({ ...b, id: `opt${i}`, source: 'user' }));
     return {
       date,
-      actualMinutes: minutesByCategory(await this.day(date), date),
+      actualMinutes: minutesByCategory(await this.loggedDay(date), date),
       optimalMinutes: minutesByCategory(optimalBlocks, date),
     };
   }
@@ -210,18 +340,20 @@ export class TimebackApp {
         { id: this.newId(), name: 'Weekend', weekdays: [0, 6], blocks: [] },
       ];
     }
-    const [categories, goals, settings, insights] = await Promise.all([
+    const [categories, goals, settings, insights, decisions] = await Promise.all([
       this.repo.listCategories(),
       this.repo.listGoals(),
       this.repo.getSettings(),
       this.insights(today),
+      this.repo.listSuggestionDecisions(),
     ]);
+    const keepAsUsual = rejectedCategories(decisions);
     const out: Routine[] = [];
     for (const r of routines) {
       const date = nextDateOn(today, r.weekdays);
       const kept = r.blocks.filter((b) => b.edited);
       const fixedBlocks = routineOps.planForDate([{ ...r, blocks: kept, weekdays: [0, 1, 2, 3, 4, 5, 6] }], date, []);
-      const plan = this.optimizer.plan({ date, categories, goals: goals.filter((g) => g.active), insights, fixedBlocks, settings });
+      const plan = this.optimizer.plan({ date, categories, goals: goals.filter((g) => g.active), insights, fixedBlocks, settings, keepAsUsual });
       const fresh = routineOps.blocksFromOptimalDay({ ...plan, blocks: plan.blocks.filter((b) => b.origin === 'planned') }, this.newId);
       const updated: Routine = { ...r, blocks: routineOps.normalize([...kept, ...fresh]), generatedAt: now };
       await this.repo.saveRoutine(updated);
@@ -294,7 +426,7 @@ export class TimebackApp {
 
   /** The plan for a date: its routine with the calendar's fixed events on top. Null if no routine covers it. */
   async planForDate(date: DateKey): Promise<TimeBlock[] | null> {
-    const [routines, categories, dayBlocks] = await Promise.all([this.repo.listRoutines(), this.repo.listCategories(), this.day(date)]);
+    const [routines, categories, dayBlocks] = await Promise.all([this.repo.listRoutines(), this.repo.listCategories(), this.loggedDay(date)]);
     const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
     if (!routineOps.routineForWeekday(routines, weekday)) return null;
     const fixedCats = new Set(categories.filter((c) => c.flexibility === 'fixed').map((c) => c.id));
@@ -304,7 +436,7 @@ export class TimebackApp {
   /** How closely a logged day followed its routine (0–1), or null if there's nothing to compare. */
   async adherence(date: DateKey): Promise<number | null> {
     const plan = await this.planForDate(date);
-    return plan ? routineOps.adherence(await this.day(date), plan, date) : null;
+    return plan ? routineOps.adherence(await this.loggedDay(date), plan, date) : null;
   }
 
   // -- internals --------------------------------------------------------------
@@ -313,7 +445,7 @@ export class TimebackApp {
   private async history(date: DateKey) {
     const from = addDays(date, -this.historyDays);
     // Include the evening before `from` so sleep that started then is counted.
-    const blocks = await this.repo.listBlocks(`${addDays(from, -1)}T00:00`, `${date}T00:00`);
+    const blocks = (await this.repo.listBlocks(`${addDays(from, -1)}T00:00`, `${date}T00:00`)).filter(isLogged);
     const dates = wellLoggedDays(blocks, dateRange(from, addDays(date, -1)), await this.repo.getSettings());
     return { blocks, dates };
   }
@@ -336,4 +468,29 @@ function nextDateOn(from: DateKey, weekdays: number[]): DateKey {
     if (weekdays.includes(new Date(`${d}T00:00:00Z`).getUTCDay())) return d;
   }
   throw new Error('Routine has no weekdays');
+}
+
+/** False for plan blocks the user hasn't confirmed yet; those must not count as things that happened. */
+function isLogged(b: TimeBlock): boolean {
+  return b.status !== 'planned';
+}
+
+/** Categories with a rejected suggestion: the optimizer keeps them at their usual level. */
+function rejectedCategories(decisions: SuggestionRecord[]): string[] {
+  return [...new Set(decisions.filter((d) => d.decision === 'rejected').map((d) => d.categoryId))];
+}
+
+function sumSpans(spans: Array<[number, number]>): number {
+  return spans.reduce((sum, [s, e]) => sum + (e - s), 0);
+}
+
+/** Parts of [s, e) not covered by any of `taken`. */
+function cutAround([s, e]: [number, number], taken: Array<[number, number]>): Array<[number, number]> {
+  let pieces: Array<[number, number]> = [[s, e]];
+  for (const [ts, te] of taken) {
+    pieces = pieces.flatMap(([ps, pe]): Array<[number, number]> =>
+      te <= ps || ts >= pe ? [[ps, pe]] : [...(ts > ps ? [[ps, ts] as [number, number]] : []), ...(te < pe ? [[te, pe] as [number, number]] : [])],
+    );
+  }
+  return pieces;
 }
