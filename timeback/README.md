@@ -34,6 +34,7 @@ Requires Node ≥ 22.18, which runs `.ts` files directly.
 ![Routine, edit a block, live check](design/mobile-3.png)
 ![Plan on the calendar, did you do it, how the day went](design/mobile-4.png)
 ![Activities, add your own, planned from day one](design/mobile-5.png)
+![Coach notices, now vs. proposed, accept](design/mobile-6.png)
 
 Mockups are drawn from real engine output on the demo data. There are four
 tabs:

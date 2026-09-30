@@ -21,6 +21,10 @@ test('coach notices heavy phone use and a lunch that drags on, and says so in on
   const kinds = c.observations.map((o) => `${o.kind}:${o.categoryId}`);
   assert.ok(kinds.includes('timeSink:scrolling'), kinds.join(' '));
   assert.ok(kinds.includes('longSessions:meals'), kinds.join(' '));
+  // Chores are disliked but must happen; the plan can't cut them, so the coach doesn't nag about them.
+  assert.ok(!kinds.some((k) => k.endsWith(':chores')), kinds.join(' '));
+  // Every observation can be answered with "Not for me": it maps to a suggestion in the plan.
+  for (const o of c.observations) assert.ok(c.suggestions.some((s) => s.key === o.suggestionKey), `${o.kind}:${o.categoryId}`);
   const lunch = c.observations.find((o) => o.kind === 'longSessions')!;
   assert.equal(lunch.message, 'Your midday meals take 1h30m on average, when 45m is enough.');
   const phone = c.observations.find((o) => o.kind === 'timeSink')!;

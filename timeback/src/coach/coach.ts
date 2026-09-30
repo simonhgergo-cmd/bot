@@ -29,8 +29,8 @@ export function observe({ categories, insights, goals, progress }: ObserveInput)
     if (!stats || c.archived) continue;
     const what = c.name.toLowerCase();
 
-    // Lots of time on something the user dislikes.
-    if (c.enjoyment === 'dislikes' && c.flexibility !== 'fixed' && stats.avgMinutesPerDay >= TIME_SINK_MINUTES) {
+    // Lots of time on something the user dislikes and could cut (not chores that must happen anyway).
+    if (c.enjoyment === 'dislikes' && c.flexibility === 'flexible' && stats.avgMinutesPerDay >= TIME_SINK_MINUTES) {
       const avg = stats.avgMinutesPerDay;
       const cap = capGoal(c.id);
       out.push({
